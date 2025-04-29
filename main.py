@@ -6,7 +6,6 @@ import re
 from typing import List, Optional, Dict, Tuple
 import asyncio
 from bs4 import BeautifulSoup
-from datetime import datetime
 from pathlib import Path
 import aiohttp
 from astrbot.api.star import StarTools
