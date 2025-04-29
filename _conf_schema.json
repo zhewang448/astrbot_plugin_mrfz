@@ -1,0 +1,14 @@
+{
+  "auto_download": {
+    "description": "是否自动下载未找到的角色语音",
+    "type": "bool",
+    "hint": "true/false",
+    "default": true
+  },
+  "default_language": {
+    "description": "默认语音语言",
+    "type": "string",
+    "hint": "jp/cn",
+    "default": "jp"
+  }
+} 
