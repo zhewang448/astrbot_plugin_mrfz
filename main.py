@@ -447,3 +447,4 @@ class MyPlugin(Star):
             yield event.chain_result(chain)
         except Exception as e:
             yield event.plain_result(f"发送语音消息时出错：{str(e)}")
+            
