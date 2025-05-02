@@ -6,9 +6,9 @@
     "default": true
   },
   "default_language": {
-    "description": "默认语音语言",
     "type": "string",
-    "hint": "jp/cn",
-    "default": "jp"
-  }
+    "description": "设置语言优先级     1:方言, 2:汉语, 3:日语",
+    "hint": "将对应的语音序号优先级输入，默认为123",
+    "default": "123"
+}
 } 

@@ -6,13 +6,14 @@ import re
 from typing import List, Optional, Dict, Tuple
 import asyncio
 from bs4 import BeautifulSoup
+from datetime import datetime
 from pathlib import Path
 import aiohttp
 from astrbot.api.star import StarTools
 import json
 
 
-@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "1.0.0")
+@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "1.5.0")
 class MyPlugin(Star):
     # 语音描述列表
     VOICE_DESCRIPTIONS = [
@@ -28,13 +29,14 @@ class MyPlugin(Star):
     # 已知角色ID映射
     KNOWN_CHARACTER_IDS = {
         "阿": "char_225_haak",
+        "维什戴尔皮肤":"char_1035_wisdel_sale__14"
         # 可以添加更多已知的角色ID
     }
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
-        self.voices_dir = StarTools.get_data_dir("astrbot_plugin_mrfz") / "voices"
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_mrfz")
+        self.voices_dir = self.data_dir / "voices"
         self.voice_index: Dict[str, Dict[str, List[str]]] = {}
         
         # 确保数据目录存在
@@ -46,7 +48,8 @@ class MyPlugin(Star):
         # 从配置中读取设置
         self.config = config
         self.auto_download = self.config.get("auto_download", True)
-        self.default_language = self.config.get("default_language", "jp")
+        self.language_list=["fy","jp", "cn"]
+        self.default_language_rank = self.config.get("default_language_rank", "123")
         
         # 创建voices目录并扫描文件
         self.voices_dir.mkdir(exist_ok=True)
@@ -54,24 +57,20 @@ class MyPlugin(Star):
 
     def _handle_config_schema(self) -> None:
         """处理配置文件,确保它在正确的位置"""
-        schema_content = {
-            "type": "object",
-            "properties": {
-                "auto_download": {
-                    "type": "boolean",
-                    "title": "自动下载",
-                    "description": "是否在找不到语音时自动下载",
-                    "default": True
-                },
-                "default_language": {
-                    "type": "string",
-                    "title": "默认语言",
-                    "description": "默认使用的语音语言",
-                    "enum": ["jp", "cn"],
-                    "default": "jp"
-                }
+        schema_content ={
+            "auto_download": {
+                "description": "是否自动下载未找到的角色语音",
+                "type": "bool",
+                "hint": "true/false",
+                "default": True
+            },
+            "default_language_rank": {
+                "type": "string",
+                "description": "设置语言优先级     1:方言, 2:汉语, 3:日语",
+                "hint": "将对应的语音序号优先级输入，默认为123",
+                "default": "123"
             }
-        }
+} 
         
         # 配置文件路径
         config_path = self.data_dir / "_conf_schema.json"
@@ -256,6 +255,10 @@ class MyPlugin(Star):
                 "jp": {
                     "base_url": f"https://torappu.prts.wiki/assets/audio/voice/{char_id}",
                     "patterns": ["cn_{num:03d}.wav"]
+                },
+                "fy":{
+                    "base_url": f"https://torappu.prts.wiki/assets/audio/voice_custom/{char_id}_cn_fy",
+                    "patterns": ["cn_{num:03d}.wav"]
                 }
             }
             total_voices = 0
@@ -297,7 +300,7 @@ class MyPlugin(Star):
                             }) as response:
                                 if response.status == 200:
                                     print(f"正在下载: {lang}语音{file_idx} ({voice_url}) -> {description}.wav")
-                                    await asyncio.sleep(0.5)
+                                    #await asyncio.sleep(0.1)
                                     success, message = await self.download_voice(character, voice_url, lang, description)
                                     if success:
                                         total_voices += 1
@@ -325,15 +328,17 @@ class MyPlugin(Star):
 
     @filter.command("mrfz")
     async def mrfz_handler(self, event: AstrMessageEvent, character: str = None, voice_name: str = None, language: str = None):
-        """/mrfz [角色名] [语音名] [jp/cn] 随机播放指定角色的语音。不指定语音名则随机播放。"""
+        """/mrfz [角色名] [语音名] [jp/cn/fy] 随机播放指定角色的语音。不指定语音名则随机播放。"""
         try:
             # 处理语言参数
             if not language:
-                lang = self.default_language
+                lang = self.language_list[int(self.default_language_rank[0])-1]
             elif language.lower() in ["cn", "1"]:
                 lang = "cn"
             elif language.lower() in ["jp", "0"]:
                 lang = "jp" 
+            elif language.lower() in ["fy"]:
+                lang = "fy"
             else:
                 yield event.plain_result("语言参数错误,请使用 jp 或 cn")
                 return
@@ -402,6 +407,8 @@ class MyPlugin(Star):
                     langs.append("日语")
                 if "cn" in self.voice_index[char]:
                     langs.append("中文")
+                if "fy" in self.voice_index[char]:
+                    langs.append("方言")
                 if langs:
                     downloaded_chars[char] = langs
             
