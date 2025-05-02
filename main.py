@@ -257,7 +257,7 @@ class MyPlugin(Star):
                     "patterns": ["cn_{num:03d}.wav"]
                 },
                 "fy":{
-                    "base_url": f"https://torappu.prts.wiki/assets/audio/voice_custom/{char_id}_cn_fy",
+                    "base_url": f"https://torappu.prts.wiki/assets/audio/voice_custom/{char_id}_cn_topolect",
                     "patterns": ["cn_{num:03d}.wav"]
                 }
             }
