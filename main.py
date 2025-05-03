@@ -29,7 +29,8 @@ class MyPlugin(Star):
     # 已知角色ID映射
     KNOWN_CHARACTER_IDS = {
         "阿": "char_225_haak",
-        "维什戴尔皮肤":"char_1035_wisdel_sale__14"
+        "维什戴尔皮肤":"char_1035_wisdel_sale__14",
+        "年":"char_2014_nian"
         # 可以添加更多已知的角色ID
     }
 
