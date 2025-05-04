@@ -5,7 +5,7 @@
 ## 访问统计
 ## <a href="https://count.getloli.com/"><img src="https://count.getloli.com/get/@:astrbot_plugin_mrfz?theme=rule34"></a>
 
-#注意！
+# 注意！
 若你用过v1.5.0及之前的版本 ，请在更新到v1.6.0后，在"AstrBot\data\config"中删除astrbot_plugin_mrfz_config.json文件，否则会导致配置显示异常。
 
 ## 功能特点
@@ -20,6 +20,7 @@
 
 v1.6.0
 修复配置问题
+
 v1.5.0
 新增方言语音，并可通过配置项设置默认语言优先级。
 
