@@ -13,7 +13,7 @@ from astrbot.api.star import StarTools
 import json
 
 
-@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "1.5.0")
+@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "1.6.0")
 class MyPlugin(Star):
     # 语音描述列表
     VOICE_DESCRIPTIONS = [
@@ -49,7 +49,7 @@ class MyPlugin(Star):
         # 从配置中读取设置
         self.config = config
         self.auto_download = self.config.get("auto_download", True)
-        self.language_list=["fy","jp", "cn"]
+        self.language_list=["fy","cn", "jp"]
         self.default_language_rank = self.config.get("default_language_rank", "123")
         
         # 创建voices目录并扫描文件
@@ -341,7 +341,7 @@ class MyPlugin(Star):
             elif language.lower() in ["fy"]:
                 lang = "fy"
             else:
-                yield event.plain_result("语言参数错误,请使用 jp 或 cn")
+                yield event.plain_result("语言参数错误,请使用 jp(日语)、cn(中文)、fy(方言)")
                 return
 
             # 如果未指定角色,随机选择一个角色
