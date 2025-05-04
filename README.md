@@ -6,7 +6,7 @@
 ## <a href="https://count.getloli.com/"><img src="https://count.getloli.com/get/@:astrbot_plugin_mrfz?theme=rule34"></a>
 
 # 注意！
-若你用过v1.5.0及之前的版本 ，请在更新到v1.6.0后，在"AstrBot\data\config"中删除astrbot_plugin_mrfz_config.json文件，否则会导致配置显示异常。
+## 若你用过v1.5.0及之前的版本 ，请在更新到v1.6.0后，在"AstrBot\data\config"中删除astrbot_plugin_mrfz_config.json文件，否则会导致配置显示异常。
 
 ## 功能特点
 
