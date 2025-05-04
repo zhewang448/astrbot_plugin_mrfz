@@ -5,7 +5,7 @@
     "hint": "true/false",
     "default": true
   },
-  "default_language": {
+  "default_language_rank": {
     "type": "string",
     "description": "设置语言优先级     1:方言, 2:汉语, 3:日语",
     "hint": "将对应的语音序号优先级输入，默认为123",
