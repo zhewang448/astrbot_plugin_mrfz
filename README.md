@@ -1,12 +1,15 @@
-# 明日方舟角色语音插件
+# 明日方舟角色语音插件 astrbot_plugin_mrfz
 
+v2.0.0
 这是一个高级的自动化的明日方舟所有角色语音的 AstrBot 插件。
 
 ## 访问统计
+
 ## <a href="https://count.getloli.com/"><img src="https://count.getloli.com/get/@:astrbot_plugin_mrfz?theme=rule34"></a>
 
 # 注意！
-## 若你用过v1.5.0及之前的版本 ，请在更新到v1.6.0后，在"AstrBot\data\config"中删除astrbot_plugin_mrfz_config.json文件，否则会导致配置显示异常。
+
+## 若你用过 v1.5.0 及之前的版本 ，请在更新到 v1.6.0 后，在"AstrBot\data\config"中删除 astrbot_plugin_mrfz_config.json 文件，否则会导致配置显示异常。
 
 ## 功能特点
 
@@ -16,50 +19,56 @@
 - 智能语音文件管理
 - 配置通过 Schema 系统管理
 
-## 版本更新
+## 指令说明
 
-v1.6.0
-修复配置问题
+- `/mrfz [角色名] [语音名] [jp/cn/fy]` 随机或指定播放角色语音
+- `/mrfz_list` 查看所有可用语音和已下载角色
+- `/mrfz_fetch [角色名]` 下载指定角色及其皮肤的全部语音
 
-v1.5.0
-新增方言语音，并可通过配置项设置默认语言优先级。
-
-## 命令列表
-
-1. `/mrfz [角色名] [语音名] [jp/cn/fy]`
-   - 播放指定角色的语音
-   - 不指定语音名则随机播放
-   - 语言参数可选，默认值可在配置中设置
-
-2. `/mrfz_list`
-   - 显示所有可用的语音类型
-   - 显示已下载角色的列表（包括语言信息）
-
-3. `/mrfz_fetch [角色名]`
-   - 从网络获取并下载指定角色的全部语音
-
-## 配置说明
-
-插件使用 AstrBot 的配置系统，可在 `_conf_schema.json` 中查看配置项：
+## 配置项
 
 - `auto_download`: 是否自动下载未找到的角色语音（默认：true）
-- `default_language`: 默认语音语言（默认：jp）
+- `auto_download_skin`: 是否自动下载角色的皮肤语音（默认：true）
+- `default_language_rank`: 语言优先级设置（如 123，1:方言，2:中文，3:日语）
 
 ## 目录结构
 
 ```
-astrbot_plugin_mrfz/
-├── main.py            # 主程序
-├── _conf_schema.json  # 配置模式
-└── voices/           # 语音文件目录
-    └── [角色名]/
-        ├── jp/      # 日语语音
-        └── cn/      # 中文语音
+voices/
+  干员名/
+    jp/
+    cn/
+    fy/
+    skin/
+      jp/
+      cn/
+      fy/
 ```
+
+## 更新日志
+
+### v2.0.0
+
+- 优化皮肤 ID 自动识别，支持所有皮肤 ID 格式
+- 皮肤语音与普通语音分目录存储
+- 下载统计更准确，支持失败数统计
+- 新增`auto_download_skin`配置项
+- 代码结构优化，提升健壮性
+
+### v1.6.0 及更早
+
+- 支持明日方舟干员语音下载与播放
+- 支持多语言
+- 支持自动下载
+
+## 许可证
+
+MIT
 
 ## 使用示例
 
 1. 播放语音：
+
    ```
    /mrfz 阿 任命助理 jp
    /mrfz 阿米娅 交谈1
@@ -67,6 +76,7 @@ astrbot_plugin_mrfz/
    ```
 
 2. 查看语音列表：
+
    ```
    /mrfz_list
    ```
@@ -78,12 +88,12 @@ astrbot_plugin_mrfz/
 
 ## 注意事项
 
-1. 语音文件来自 PRTS Wiki，请遵守相关使用规则 
+1. 语音文件来自 PRTS Wiki，请遵守相关使用规则
 2. 下载过程中请保持网络连接稳定
 3. 语音文件会占用一定磁盘空间，请确保有足够存储空间
-   若想删除可以在AstrBot\data\plugin_data\astrbot_plugin_mrfz\voices目录中手动删除，并在之后重载插件   
+   若想删除可以在 AstrBot\data\plugin_data\astrbot_plugin_mrfz\voices 目录中手动删除，并在之后重载插件
 
 ## ⭐ Stars
 
-> [!TIP] 
+> [!TIP]
 > 如果本项目对您的生活 / 工作产生了帮助，或者您关注本项目的未来发展，请给项目 Star，这是我维护这个开源项目的动力 <3>

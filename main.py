@@ -13,7 +13,7 @@ from astrbot.api.star import StarTools
 import json
 
 
-@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "1.6.0")
+@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "2.0.0")
 class MyPlugin(Star):
     # 语音描述列表
     VOICE_DESCRIPTIONS = [
@@ -34,6 +34,14 @@ class MyPlugin(Star):
         # 可以添加更多已知的角色ID
     }
 
+    # 皮肤语音配置
+    SKIN_VOICE_CONFIGS = {
+        "维什戴尔皮肤": {
+            "base_url": "https://torappu.prts.wiki/assets/audio/voice",
+            "patterns": ["cn_{num:03d}.wav"]
+        }
+    }
+
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_mrfz")
@@ -49,6 +57,7 @@ class MyPlugin(Star):
         # 从配置中读取设置
         self.config = config
         self.auto_download = self.config.get("auto_download", True)
+        self.auto_download_skin = self.config.get("auto_download_skin", True)
         self.language_list=["fy","cn", "jp"]
         self.default_language_rank = self.config.get("default_language_rank", "123")
         
@@ -65,13 +74,19 @@ class MyPlugin(Star):
                 "hint": "true/false",
                 "default": True
             },
+            "auto_download_skin": {
+                "description": "是否自动下载角色的皮肤语音",
+                "type": "bool",
+                "hint": "true/false",
+                "default": True
+            },
             "default_language_rank": {
                 "type": "string",
                 "description": "设置语言优先级     1:方言, 2:汉语, 3:日语",
                 "hint": "将对应的语音序号优先级输入，默认为123",
                 "default": "123"
             }
-} 
+        } 
         
         # 配置文件路径
         config_path = self.data_dir / "_conf_schema.json"
@@ -106,6 +121,10 @@ class MyPlugin(Star):
 
     def _get_character_dir(self, character: str) -> Path:
         """获取角色语音目录"""
+        # 如果是皮肤，使用基础角色名
+        if character.endswith("皮肤"):
+            base_character = character.replace("皮肤", "")
+            return self.voices_dir / base_character
         return self.voices_dir / character
 
     def _get_voice_files(self, character: str, language: str = "jp") -> List[str]:
@@ -122,13 +141,22 @@ class MyPlugin(Star):
         """获取语音文件的完整路径"""
         char_dir = self._get_character_dir(character)
         
-        # 优先查找指定语言
-        path = char_dir / language / voice_name
+        # 如果是皮肤，使用skin子目录
+        if character.endswith("皮肤"):
+            path = char_dir / "skin" / language / voice_name
+        else:
+            path = char_dir / language / voice_name
+            
         if path.exists():
             return path
             
         # 如果指定语言没有，查找所有语言
-        for lang_dir in char_dir.iterdir():
+        if character.endswith("皮肤"):
+            base_path = char_dir / "skin"
+        else:
+            base_path = char_dir
+            
+        for lang_dir in base_path.iterdir():
             if not lang_dir.is_dir():
                 continue
             path = lang_dir / voice_name
@@ -140,7 +168,11 @@ class MyPlugin(Star):
         """下载单个语音文件"""
         try:
             # 创建保存目录
-            save_dir = self._get_character_dir(character) / language
+            char_dir = self._get_character_dir(character)
+            if character.endswith("皮肤"):
+                save_dir = char_dir / "skin" / language
+            else:
+                save_dir = char_dir / language
             save_dir.mkdir(parents=True, exist_ok=True)
             
             # 生成安全的文件名
@@ -195,6 +227,49 @@ class MyPlugin(Star):
         except Exception as e:
             return False, f"未知错误: {str(e)}"
 
+    async def get_skin_voice_url(self, char_id: str) -> Optional[str]:
+        """获取皮肤语音的URL"""
+        try:
+            # 从char_id中提取基础ID（去掉可能的skin后缀）
+            base_id = char_id.split('_skin')[0] if '_skin' in char_id else char_id
+            
+            # 尝试不同的皮肤语音URL模式
+            patterns = [
+                # 标准皮肤语音路径
+                f"https://torappu.prts.wiki/assets/audio/voice/{base_id}_skin",
+                # 中文皮肤语音路径
+                f"https://torappu.prts.wiki/assets/audio/voice_cn/{base_id}_skin",
+                # 特殊皮肤路径（如维什戴尔）
+                f"https://torappu.prts.wiki/assets/audio/voice/{base_id}",
+                # 备用路径
+                f"https://torappu.prts.wiki/assets/audio/voice_cn/{base_id}",
+                # 超新星皮肤路径
+                f"https://torappu.prts.wiki/assets/audio/voice/{base_id}_sale__14",
+                f"https://torappu.prts.wiki/assets/audio/voice_cn/{base_id}_sale__14"
+            ]
+            
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Referer": "https://prts.wiki/"
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                for base_url in patterns:
+                    test_url = f"{base_url}/cn_001.wav"
+                    try:
+                        async with session.head(test_url, headers=headers) as response:
+                            if response.status == 200:
+                                print(f"找到皮肤语音URL: {base_url}")
+                                return base_url
+                    except:
+                        continue
+            
+            return None
+            
+        except Exception as e:
+            print(f"获取皮肤语音URL时出错: {str(e)}")
+            return None
+
     async def get_character_id(self, character: str) -> Optional[str]:
         """获取角色的语音ID"""
         try:
@@ -203,23 +278,105 @@ class MyPlugin(Star):
                 return self.KNOWN_CHARACTER_IDS[character]
             
             # 2. 尝试从PRTS Wiki获取
-            wiki_url = f"https://prts.wiki/w/{character}"
+            # 对角色名进行URL编码
+            encoded_character = character.replace("皮肤", "")
+            wiki_url = f"https://prts.wiki/w/{encoded_character}/语音记录"
+            print(f"正在访问URL: {wiki_url}")
+            
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Referer": "https://prts.wiki/"
             }
             
             async with aiohttp.ClientSession() as session:
                 async with session.get(wiki_url, headers=headers) as response:
                     if response.status != 200:
+                        print(f"访问页面失败: HTTP {response.status}")
                         return None
                     
                     content = await response.text()
                     soup = BeautifulSoup(content, 'html.parser')
                     
-                    # 查找包含角色ID的元素
+                    # 如果是皮肤，尝试从页面中提取皮肤ID
+                    if character.endswith("皮肤"):
+                        print("正在查找皮肤ID...")
+                        # 1. 首先查找语音表格
+                        voice_table = soup.find('table', class_='wikitable')
+                        if voice_table:
+                            print("找到语音表格")
+                            # 查找所有语音行
+                            for row in voice_table.find_all('tr'):
+                                # 查找包含语音信息的单元格
+                                voice_cell = row.find('td', class_='voice-cell')
+                                if voice_cell:
+                                    print("找到语音单元格")
+                                    # 查找语音按钮
+                                    voice_btn = voice_cell.find('button', class_='voice-btn')
+                                    if voice_btn and 'data-voice-base' in voice_btn.attrs:
+                                        voice_base = voice_btn['data-voice-base']
+                                        print(f"找到语音信息: {voice_base}")
+                                        # 解析语音信息
+                                        for voice_part in voice_base.split(','):
+                                            if 'voice' in voice_part and 'char_' in voice_part:
+                                                # 提取完整的皮肤ID
+                                                match = re.search(r'char_\d+_[^,]+', voice_part)
+                                                if match:
+                                                    skin_id = match.group(0)
+                                                    # 检查是否是皮肤ID（以下划线加数字结尾）
+                                                    if re.search(r'_\d+$', skin_id):
+                                                        print(f"找到皮肤ID: {skin_id}")
+                                                        return skin_id
+                        # 2. 查找皮肤信息区域
+                        skin_section = soup.find('div', class_='skin-info')
+                        if skin_section:
+                            print("找到皮肤信息区域")
+                            # 查找所有语音相关元素
+                            for element in skin_section.find_all(['div', 'span', 'a']):
+                                if 'data-voice-id' in element.attrs:
+                                    skin_id = element['data-voice-id']
+                                    # 检查是否是皮肤ID（以下划线加数字结尾）
+                                    if re.search(r'_\d+$', skin_id):
+                                        print(f"从皮肤信息区域找到ID: {skin_id}")
+                                        return skin_id
+                        # 3. 查找所有可能包含皮肤ID的元素
+                        print("搜索所有可能包含皮肤ID的元素...")
+                        for element in soup.find_all(['div', 'span', 'a', 'button']):
+                            # 检查所有可能包含皮肤ID的属性
+                            for attr in ['data-voice-id', 'data-voice-base', 'data-skin-id']:
+                                if attr in element.attrs:
+                                    value = element[attr]
+                                    print(f"找到属性 {attr}: {value}")
+                                    if 'char_' in value:
+                                        # 解析语音信息
+                                        for voice_part in value.split(','):
+                                            if 'voice' in voice_part and 'char_' in voice_part:
+                                                match = re.search(r'char_\d+_[^,]+', voice_part)
+                                                if match:
+                                                    skin_id = match.group(0)
+                                                    # 检查是否是皮肤ID（以下划线加数字结尾）
+                                                    if re.search(r'_\d+$', skin_id):
+                                                        print(f"找到皮肤ID: {skin_id}")
+                                                        return skin_id
+                        # 4. 在页面内容中搜索可能的ID
+                        print("在页面内容中搜索ID...")
+                        content_str = str(soup)
+                        matches = re.findall(r'char_\d+_[^,]+', content_str)
+                        if matches:
+                            print(f"在页面内容中找到可能的ID: {matches}")
+                            # 过滤出以下划线加数字结尾的ID
+                            skin_matches = [m for m in matches if re.search(r'_\d+$', m)]
+                            if skin_matches:
+                                print(f"找到皮肤ID: {skin_matches[0]}")
+                                return skin_matches[0]
+                        # 没有找到合法皮肤ID，直接返回None
+                        print("未找到合法皮肤ID")
+                        return None
+                    # 如果不是皮肤，查找普通角色ID
                     for element in soup.find_all(['div', 'span', 'a']):
                         if 'data-char-id' in element.attrs:
-                            return f"char_{element['data-char-id']}"
+                            char_id = element['data-char-id']
+                            print(f"找到普通角色ID: char_{char_id}")
+                            return f"char_{char_id}"
                     
                     # 查找语音相关链接
                     for link in soup.find_all('a', href=True):
@@ -227,13 +384,16 @@ class MyPlugin(Star):
                         if 'voice' in href and 'char_' in href:
                             match = re.search(r'char_\d+_\w+', href)
                             if match:
+                                print(f"从链接中找到ID: {match.group(0)}")
                                 return match.group(0)
                     
                     # 在页面内容中搜索可能的ID
-                    matches = re.findall(r'char_\d+_[a-zA-Z0-9]+', str(soup))
+                    matches = re.findall(r'char_\d+_\w+', str(soup))
                     if matches:
+                        print(f"在页面内容中找到ID: {matches[0]}")
                         return matches[0]
             
+            print("未找到任何ID")
             return None
             
         except Exception as e:
@@ -243,11 +403,22 @@ class MyPlugin(Star):
     async def fetch_character_voices(self, character: str) -> Tuple[bool, str]:
         """获取角色语音"""
         try:
+            # 获取基础角色名（去掉"皮肤"后缀）
+            base_character = character.replace("皮肤", "")
+            
+            # 获取角色ID
             char_id = await self.get_character_id(character)
+            # 如果是皮肤且没找到合法皮肤ID，直接跳过
+            if character.endswith("皮肤") and not char_id:
+                return False, f"{character} 没有专属皮肤语音"
             if not char_id:
                 return False, f"无法获取角色 {character} 的ID"
             print(f"获取到角色ID: {char_id}")
             
+            # 检查是否是皮肤语音
+            is_skin = character.endswith("皮肤")
+            
+            # 构建语音配置
             voice_configs = {
                 "cn": {
                     "base_url": f"https://torappu.prts.wiki/assets/audio/voice_cn/{char_id}",
@@ -257,13 +428,16 @@ class MyPlugin(Star):
                     "base_url": f"https://torappu.prts.wiki/assets/audio/voice/{char_id}",
                     "patterns": ["cn_{num:03d}.wav"]
                 },
-                "fy":{
+                "fy": {
                     "base_url": f"https://torappu.prts.wiki/assets/audio/voice_custom/{char_id}_cn_topolect",
                     "patterns": ["cn_{num:03d}.wav"]
                 }
             }
+            
             total_voices = 0
             failed_voices = 0
+            skin_total_voices = 0
+            skin_failed_voices = 0
             
             for lang, config in voice_configs.items():
                 base_url = config["base_url"]
@@ -301,27 +475,69 @@ class MyPlugin(Star):
                             }) as response:
                                 if response.status == 200:
                                     print(f"正在下载: {lang}语音{file_idx} ({voice_url}) -> {description}.wav")
-                                    #await asyncio.sleep(0.1)
                                     success, message = await self.download_voice(character, voice_url, lang, description)
                                     if success:
-                                        total_voices += 1
+                                        if is_skin:
+                                            skin_total_voices += 1
+                                        else:
+                                            total_voices += 1
                                         desc_idx += 1  # 只有下载成功才移动到下一个描述
                                         print(f"成功下载: {lang}语音{file_idx}")
                                     else:
-                                        failed_voices += 1
+                                        if is_skin:
+                                            skin_failed_voices += 1
+                                        else:
+                                            failed_voices += 1
                                         print(f"下载失败 ({lang}语音{file_idx}): {message}")
                                 else:
                                     print(f"语音{file_idx}不存在，跳过")
                     except Exception as e:
                         print(f"下载{lang}语音{file_idx}时出错: {str(e)}")
-                        failed_voices += 1
+                        if is_skin:
+                            skin_failed_voices += 1
+                        else:
+                            failed_voices += 1
                     
                     file_idx += 1  # 无论成功与否都尝试下一个文件
-                    
-            if total_voices == 0:
+            
+            # 如果不是皮肤且启用了自动下载皮肤语音，尝试下载皮肤语音
+            if not is_skin and self.auto_download_skin:
+                skin_character = f"{base_character}皮肤"
+                print(f"尝试下载{skin_character}的语音...")
+                skin_success, skin_result = await self.fetch_character_voices(skin_character)
+                if skin_success:
+                    # 从皮肤下载结果中提取统计信息
+                    if isinstance(skin_result, str):
+                        # 处理合并后的消息
+                        match = re.search(r'皮肤语音: (\d+)个(?:\(失败(\d+)个\))?', skin_result)
+                        if match:
+                            skin_total_voices += int(match.group(1))
+                            if match.group(2):
+                                skin_failed_voices += int(match.group(2))
+                    else:
+                        # 处理消息列表
+                        for msg in skin_result:
+                            if "皮肤语音:" in msg:
+                                match = re.search(r'皮肤语音: (\d+)个(?:\(失败(\d+)个\))?', msg)
+                                if match:
+                                    skin_total_voices += int(match.group(1))
+                                    if match.group(2):
+                                        skin_failed_voices += int(match.group(2))
+                else:
+                    print(f"下载{skin_character}的语音失败: {skin_result}")
+            
+            # 构建返回消息
+            result_msg = []
+            if total_voices > 0 or failed_voices > 0:
+                result_msg.append(f"普通语音: {total_voices}个" + (f"(失败{failed_voices}个)" if failed_voices > 0 else ""))
+            if skin_total_voices > 0 or skin_failed_voices > 0:
+                result_msg.append(f"皮肤语音: {skin_total_voices}个" + (f"(失败{skin_failed_voices}个)" if skin_failed_voices > 0 else ""))
+            
+            if not result_msg:
                 return False, "未能成功下载任何语音"
-                
-            return True, f"下载完成: 成功 {total_voices} 个, 失败 {failed_voices} 个"
+            
+            # 返回合并后的消息
+            return True, "，".join(result_msg)
             
         except Exception as e:
             print(f"获取语音时出错: {str(e)}")
@@ -329,19 +545,24 @@ class MyPlugin(Star):
 
     @filter.command("mrfz")
     async def mrfz_handler(self, event: AstrMessageEvent, character: str = None, voice_name: str = None, language: str = None):
-        """/mrfz [角色名] [语音名] [jp/cn/fy] 随机播放指定角色的语音。不指定语音名则随机播放。"""
+        """/mrfz [角色名] [语音名] [jp/cn/fy/skin] 随机播放指定角色的语音。不指定语音名则随机播放。"""
         try:
             # 处理语言参数
             if not language:
-                lang = self.language_list[int(self.default_language_rank[0])-1]
+                if character in self.SKIN_VOICE_CONFIGS:
+                    lang = "skin"
+                else:
+                    lang = self.language_list[int(self.default_language_rank[0])-1]
             elif language.lower() in ["cn", "1"]:
                 lang = "cn"
             elif language.lower() in ["jp", "0"]:
                 lang = "jp" 
             elif language.lower() in ["fy"]:
                 lang = "fy"
+            elif language.lower() in ["skin"]:
+                lang = "skin"
             else:
-                yield event.plain_result("语言参数错误,请使用 jp(日语)、cn(中文)、fy(方言)")
+                yield event.plain_result("语言参数错误,请使用 jp(日语)、cn(中文)、fy(方言)、skin(皮肤语音)")
                 return
 
             # 如果未指定角色,随机选择一个角色
@@ -434,7 +655,7 @@ class MyPlugin(Star):
             
             success, result = await self.fetch_character_voices(character)
             if success:
-                yield event.plain_result(f"获取完成: {result}")
+                yield event.plain_result(result)
             else:
                 yield event.plain_result(f"获取失败: {result}")
 

@@ -5,10 +5,16 @@
     "hint": "true/false",
     "default": true
   },
+  "auto_download_skin": {
+    "description": "是否自动下载角色的皮肤语音",
+    "type": "bool",
+    "hint": "true/false",
+    "default": true
+  },
   "default_language_rank": {
     "type": "string",
     "description": "设置语言优先级     1:方言, 2:汉语, 3:日语",
     "hint": "将对应的语音序号优先级输入，默认为123",
     "default": "123"
-}
+  }
 } 
