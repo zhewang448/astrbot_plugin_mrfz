@@ -95,6 +95,8 @@ MIT
 3. 语音文件会占用一定磁盘空间，请确保有足够存储空间
    若想删除可以在 AstrBot\data\plugin_data\astrbot_plugin_mrfz\voices 目录中手动删除，并在之后重载插件
 
+## 如果有想要加入的功能，可以在issue中提
+
 ## ⭐ Stars
 
 > [!TIP]
