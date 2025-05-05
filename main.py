@@ -58,7 +58,8 @@ class MyPlugin(Star):
         self.config = config
         self.auto_download = self.config.get("auto_download", True)
         self.auto_download_skin = self.config.get("auto_download_skin", True)
-        self.language_list=["fy","cn", "jp"]
+        # 修改语言列表顺序，使其与优先级对应：1:方言, 2:汉语, 3:日语
+        self.language_list = ["fy", "cn", "jp"]
         self.default_language_rank = self.config.get("default_language_rank", "123")
         
         # 创建voices目录并扫描文件
@@ -128,14 +129,11 @@ class MyPlugin(Star):
         return self.voices_dir / character
 
     def _get_voice_files(self, character: str, language: str = "jp") -> List[str]:
-        """获取指定角色的语音文件列表"""
         if character not in self.voice_index:
             return []
-        # 合并所有语言下的文件名
-        files = set()
-        for lang_files in self.voice_index[character].values():
-            files.update(lang_files)
-        return sorted(files)
+        if language not in self.voice_index[character]:
+            return []
+        return sorted(self.voice_index[character][language])
 
     def _get_voice_path(self, character: str, voice_name: str, language: str = "jp") -> Optional[Path]:
         """获取语音文件的完整路径"""
@@ -548,22 +546,38 @@ class MyPlugin(Star):
         """/mrfz [角色名] [语音名] [jp/cn/fy/skin] 随机播放指定角色的语音。不指定语音名则随机播放。"""
         try:
             # 处理语言参数
-            if not language:
+            if language:
+                # 如果用户明确指定了语言，直接使用
+                if language.lower() in ["cn", "1"]:
+                    lang = "cn"
+                elif language.lower() in ["jp", "0"]:
+                    lang = "jp" 
+                elif language.lower() in ["fy"]:
+                    lang = "fy"
+                elif language.lower() in ["skin"]:
+                    lang = "skin"
+                else:
+                    yield event.plain_result("语言参数错误,请使用 jp(日语)、cn(中文)、fy(方言)、skin(皮肤语音)")
+                    return
+            else:
+                # 如果用户没有指定语言，使用优先级配置
                 if character in self.SKIN_VOICE_CONFIGS:
                     lang = "skin"
                 else:
-                    lang = self.language_list[int(self.default_language_rank[0])-1]
-            elif language.lower() in ["cn", "1"]:
-                lang = "cn"
-            elif language.lower() in ["jp", "0"]:
-                lang = "jp" 
-            elif language.lower() in ["fy"]:
-                lang = "fy"
-            elif language.lower() in ["skin"]:
-                lang = "skin"
-            else:
-                yield event.plain_result("语言参数错误,请使用 jp(日语)、cn(中文)、fy(方言)、skin(皮肤语音)")
-                return
+                    # 根据配置的语言优先级选择语言
+                    for rank in self.default_language_rank:
+                        try:
+                            lang_index = int(rank) - 1  # 优先级从1开始，所以减1
+                            if 0 <= lang_index < len(self.language_list):
+                                lang = self.language_list[lang_index]
+                                # 检查该语言下是否有语音文件
+                                if self._get_voice_files(character, lang):
+                                    break
+                        except (ValueError, IndexError):
+                            continue
+                    else:
+                        # 如果所有优先级都无效或没有找到语音文件，使用默认语言（方言）
+                        lang = "fy"
 
             # 如果未指定角色,随机选择一个角色
             if not character:
