@@ -1,6 +1,7 @@
 # 明日方舟角色语音插件 astrbot_plugin_mrfz
 
-v2.0.0   支持皮肤语音
+[![版本](https://img.shields.io/badge/版本-v1.0.6-blue.svg)](https://github.com/GEMILUXVII/astrbot_plugin_mrfz) [![许可证](https://img.shields.io/badge/许可证-MIT-green.svg)](LICENSE) [![Python](https://img.shields.io/badge/Python-3.10+-yellow.svg)](https://www.python.org/) [![AstrBot](https://img.shields.io/badge/AstrBot-3.4+-orange.svg)](https://github.com/Soulter/AstrBot) [![更新日期](https://img.shields.io/badge/更新日期-2025.05.06-lightgrey.svg)](https://github.com/GEMILUXVII/astrbot_plugin_mrfz)
+v2.0.0 支持皮肤语音
 这是一个高级的自动化的明日方舟所有角色语音的 AstrBot 插件。
 
 ## 访问统计
@@ -95,7 +96,7 @@ MIT
 3. 语音文件会占用一定磁盘空间，请确保有足够存储空间
    若想删除可以在 AstrBot\data\plugin_data\astrbot_plugin_mrfz\voices 目录中手动删除，并在之后重载插件
 
-## 如果有想要加入的功能，可以在issue中提
+## 如果有想要加入的功能，可以在 issue 中提
 
 ## ⭐ Stars
 
