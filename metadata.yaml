@@ -1,9 +1,9 @@
 name: astrbot_plugin_mrfz
 desc: 这是一个用于获取和播放明日方舟所有角色语音的 AstrBot 插件。
-help: /mrfz [角色名] [语音名] [jp/cn/fy] #播放指定角色的指定语音。（语言分别对应日语、中文、方言）
+help: /mrfz [角色名] [语音名] [jp/cn/fy] #（空的值填0）播放指定角色的指定语音。（语言分别对应日语、中文、方言）
 help: /mrfz [角色名]皮肤 [语音名] [jp/cn/fy] #播放指定角色的皮肤语音。
 help: /mrfz_list #列出所有可用的语音和已经下载的干员列表。
 help: /mrfz_fetch [干员名] #下载指定干员的语音。
-version: v2.0.0
+version: v3.0.0
 author: bushikq
 repo: https://github.com/zhewang448/astrbot_plugin_mrfz
