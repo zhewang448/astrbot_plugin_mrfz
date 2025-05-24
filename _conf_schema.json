@@ -16,5 +16,11 @@
     "description": "设置语言优先级     1:方言, 2:汉语, 3:日语",
     "hint": "将对应的语音序号优先级输入，默认为123",
     "default": "123"
+  },
+  "enable_log_output": {
+    "description": "是否在终端输出详细日志信息",
+    "type": "bool",
+    "hint": "true/false",
+    "default": true
   }
 } 

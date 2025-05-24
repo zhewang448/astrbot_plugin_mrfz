@@ -319,6 +319,13 @@ class MyPlugin(Star):
             self.language_list = ["fy", "cn", "jp"]  # 1:方言, 2:汉语, 3:日语
             self.default_language_rank = self.config.get("default_language_rank", "123")
             
+            # 读取日志输出设置
+            self.enable_log_output = self.config.get("enable_log_output", True)
+            # 根据配置设置日志级别
+            if not self.enable_log_output:
+                self.logger.setLevel(logging.ERROR)  # 只输出错误信息
+                self.logger.info("已禁用详细日志输出")
+            
             # 扫描已有文件
             self.scan_voice_files()
             
@@ -379,6 +386,12 @@ class MyPlugin(Star):
                 "description": "设置语言优先级     1:方言, 2:汉语, 3:日语",
                 "hint": "将对应的语音序号优先级输入，默认为123",
                 "default": "123"
+            },
+            "enable_log_output": {
+                "description": "是否在终端输出详细日志信息",
+                "type": "bool",
+                "hint": "true/false",
+                "default": True
             }
         } 
         
