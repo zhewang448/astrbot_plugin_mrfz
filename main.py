@@ -4,7 +4,7 @@ import asyncio
 import random
 import re
 from pathlib import Path
-from typing import List, Optional, Dict, Tuple, Union, Any
+from typing import List, Optional, Dict, Tuple, Union
 import aiohttp
 from bs4 import BeautifulSoup
 from jinja2 import Environment, FileSystemLoader
@@ -13,16 +13,7 @@ from PIL import Image
 from astrbot.api.all import *
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.core.config.astrbot_config import AstrBotConfig
-import random
-import re
-from typing import List, Optional, Dict, Tuple
-import asyncio
-from bs4 import BeautifulSoup
-from pathlib import Path
-import aiohttp
 from astrbot.api.star import StarTools
-import json
-import urllib.parse
 
 # 常量定义
 DEFAULT_HEADERS = {
