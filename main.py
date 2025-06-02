@@ -547,16 +547,10 @@ class MyPlugin(Star):
             else: 
                 if language:
                     # 如果用户明确指定了语言，直接使用
-                    if language.lower() in ["cn", "中文"]:
-                        lang = "cn"
-                    elif language.lower() in ["jp", "日语"]:
-                        lang = "jp" 
-                    elif language.lower() in ["fy", "方言"]:
-                        lang = "fy"
-                    elif language.lower() in ["skin"]:
-                        lang = "skin"
+                    if language.lower() in self.language_list:
+                        lang = language.lower()
                     else:
-                        yield event.plain_result("语言参数错误,请使用 jp(日语)、cn(中文)、fy(方言)、skin(皮肤语音)")
+                        yield event.plain_result("语言参数错误,请使用 jp(日语)、cn(中文)、fy(方言)、us(英语)、kr(韩语)")
                         return
                 else:
                         # 根据配置选择语言优先级
