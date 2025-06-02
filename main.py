@@ -70,11 +70,11 @@ class MyPlugin(Star):
             self.config = config
             self.auto_download = self.config.get("auto_download", True)
             self.auto_download_skin = self.config.get("auto_download_skin", True)
-            self.language_list = ["fy", "cn", "jp","us",'kr']  # 1:方言, 2:汉语, 3:日语, 4:英语, 5:韩语
-            self.default_language_rank = self.config.get("default_language_rank", "12345")
+            self.language_list = ["fy", "cn", "jp","us",'kr','it']  # 1:方言, 2:汉语, 3:日语, 4:英语, 5:韩语, 6:意大利语
+            self.default_language_rank = self.config.get("default_language_rank", "123456")
             self.enable_log_output = self.config.get("enable_log_output", False)
             self.auto_download_language = self.config.get("auto_download_language", "123")
-            self.language_dic = {"中文-普通话":"cn","英语":"us","日语":"jp","韩语":"kr","中文-方言":"fy","fy":"1","cn":"2","jp":"3","us":"4","kr":"5"}
+            self.language_dic = {"中文-普通话":"cn","英语":"us","日语":"jp","韩语":"kr","中文-方言":"fy","意大利语":"it","fy":"1","cn":"2","jp":"3","us":"4","kr":"5","it":"6"}
             # 根据配置设置日志级别
             if not self.enable_log_output:
                 self.logger.setLevel(logging.ERROR)  # 只输出错误信息
@@ -524,7 +524,7 @@ class MyPlugin(Star):
             
     @filter.command("mrfz")
     async def mrfz_handler(self, event: AstrMessageEvent, character: str = None, voice_name: str = None, language: str = None):
-        """/mrfz [角色名] [语音名] [jp/cn/fy/skin] 随机播放指定角色的语音。不指定语音名则随机播放。"""
+        """/mrfz [角色名] [语音名] [语言] 随机播放指定角色的语音。不指定语音名则随机播放。"""
         try:
             # 确保语音索引是最新的（只在开始时扫描一次）
             self.scan_voice_files()
@@ -550,7 +550,7 @@ class MyPlugin(Star):
                     if language.lower() in self.language_list:
                         lang = language.lower()
                     else:
-                        yield event.plain_result("语言参数错误,请使用 jp(日语)、cn(中文)、fy(方言)、us(英语)、kr(韩语)")
+                        yield event.plain_result("语言参数错误,请使用 jp(日语)、cn(中文)、fy(方言)、us(英语)、kr(韩语)、it(意语)")
                         return
                 else:
                         # 根据配置选择语言优先级
@@ -630,7 +630,7 @@ class MyPlugin(Star):
                     for lang_code in ["jp", "cn", "fy", "us", "kr", "it"]:
                         if lang_code in self.voice_index[char]:
                             display_name = {"jp": "日语", "cn": "中文", "fy": "方言", 
-                                          "us": "英语", "kr": "韩语"}.get(lang_code, lang_code)
+                                          "us": "英语", "kr": "韩语","it":"意语"}.get(lang_code, lang_code)
                             skin_character["languages"].append({"code": lang_code, "display": display_name})
                     
                     # 获取基础角色名，用于头像
@@ -888,7 +888,6 @@ class MyPlugin(Star):
                             elif lang['code'] == 'fy':
                                 tag_color = (58, 45, 45)
                                 text_color = (255, 182, 126)
-                            
                             draw.rectangle([(lang_x, text_y-15), (lang_x+lang_width, text_y+15)], 
                                          fill=tag_color, outline=text_color, width=1)
                             draw.text((lang_x+lang_width//2, text_y), lang_text, 
