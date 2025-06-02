@@ -4,6 +4,6 @@ help: /mrfz [角色名] [语音名] [jp/cn/fy] #（空的值填0）播放指定�
 help: /mrfz [角色名]皮肤 [语音名] [jp/cn/fy] #播放指定角色的皮肤语音。
 help: /mrfz_list #列出所有可用的语音和已经下载的干员列表。
 help: /mrfz_fetch [干员名] #下载指定干员的语音。
-version: v3.1.0
+version: v3.3.3
 author: bushikq
 repo: https://github.com/zhewang448/astrbot_plugin_mrfz

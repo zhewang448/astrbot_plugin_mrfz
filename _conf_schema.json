@@ -1,26 +1,32 @@
 {
   "auto_download": {
-    "description": "是否自动下载未找到的角色语音",
-    "type": "bool",
-    "hint": "true/false",
-    "default": true
+      "description": "是否自动下载未找到的角色语音",
+      "type": "bool",
+      "hint": "true/false",
+      "default": true
   },
   "auto_download_skin": {
-    "description": "是否自动下载角色的皮肤语音",
-    "type": "bool",
-    "hint": "true/false",
-    "default": true
+      "description": "是否自动下载角色的皮肤语音",
+      "type": "bool",
+      "hint": "true/false",
+      "default": true
   },
   "default_language_rank": {
-    "type": "string",
-    "description": "设置语言优先级     1:方言, 2:汉语, 3:日语",
-    "hint": "将对应的语音序号优先级输入，默认为123",
-    "default": "123"
+      "type": "string",
+      "description": "设置语言优先级     1:方言, 2:汉语, 3:日语, 4:英语, 5:韩语",
+      "hint": "将对应的语音序号优先级输入，默认为12345",
+      "default": "12345"
+  },
+  "auto_download_language":{
+      "type":"string",
+      "description": "设置需要自动下载的语言     1:方言, 2:汉语, 3:日语, 4:英语, 5:韩语",
+      "hint": "将对应的语音序号优先级输入，默认为123",
+      "default": "123"
   },
   "enable_log_output": {
-    "description": "是否在终端输出详细日志信息",
-    "type": "bool",
-    "hint": "true/false",
-    "default": true
+      "description": "是否在终端输出详细日志信息",
+      "type": "bool",
+      "hint": "true/false",
+      "default": false
   }
 } 
