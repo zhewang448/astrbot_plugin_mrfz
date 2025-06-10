@@ -635,7 +635,7 @@ class MyPlugin(Star):
                     
                     # 获取基础角色名，用于头像
                     base_name = char.replace("皮肤", "")
-                    skin_character["avatar_url"] =f"file://{self.data_dir / "assets" / "{base_name}.png"}".replace("\\", "/")
+                    skin_character["avatar_url"] = f"file://{self.data_dir / "assets" / base_name}.png".replace("\\", "/")
                     skin_operators.append(skin_character)
                     continue
                 
