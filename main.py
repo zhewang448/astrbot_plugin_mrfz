@@ -15,7 +15,7 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.api.star import StarTools
 
-@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "3.3.3")
+@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "3.3.4")
 class MyPlugin(Star):
     # HTTP请求头
     DEFAULT_HEADERS = {
@@ -85,10 +85,7 @@ class MyPlugin(Star):
             # 扫描已有文件
             self.scan_voice_files()
             
-            # 初始化头像缓存
-            self._avatar_cache = {}
-            self._all_avatars = {}
-            
+
             # 初始化资源文件
             asyncio.create_task(self.ensure_assets())
             
@@ -113,13 +110,13 @@ class MyPlugin(Star):
             },
             "default_language_rank": {
                 "type": "string",
-                "description": "设置语言优先级     1:方言, 2:汉语, 3:日语, 4:英语, 5:韩语",
-                "hint": "将对应的语音序号优先级输入，默认为12345",
-                "default": "12345"
+                "description": "设置语言优先级     1:方言, 2:汉语, 3:日语, 4:英语, 5:韩语, 6:意大利语",
+                "hint": "将对应的语音序号优先级输入，默认为123456",
+                "default": "123456"
             },
             "auto_download_language":{
                 "type":"string",
-                "description": "设置需要自动下载的语言     1:方言, 2:汉语, 3:日语, 4:英语, 5:韩语",
+                "description": "设置需要自动下载的语言     1:方言, 2:汉语, 3:日语, 4:英语, 5:韩语, 6:意大利语",
                 "hint": "将对应的语音序号优先级输入，默认为123",
                 "default": "123"
             },
@@ -167,7 +164,7 @@ class MyPlugin(Star):
                         elif skin_lang_dir.is_dir() and not len(os.listdir(skin_lang_dir)) == 0:
                             self.voice_index[skin_character].append(skin_lang_dir.name)
                 else:
-                    if not len(os.listdir(lang_dir)) == 0:
+                    if any(True for _ in lang_dir.iterdir()):
                         self.voice_index[character].append(lang_dir.name)
         
         # 保存索引到文件
@@ -582,6 +579,7 @@ class MyPlugin(Star):
                 # 如果是皮肤角色，尝试直接使用skin语言
                 if is_skin_character and lang != "skin":
                     voice_path = self._get_voice_path(character, voice_name, "skin")
+                    
                 
                 # 如果仍然找不到，尝试在基础角色的skin目录下查找
                 if not voice_path and is_skin_character:
@@ -635,7 +633,7 @@ class MyPlugin(Star):
                     
                     # 获取基础角色名，用于头像
                     base_name = char.replace("皮肤", "")
-                    skin_character["avatar_url"] = f"file://{self.data_dir / "assets" / base_name}.png".replace("\\", "/")
+                    skin_character["avatar_url"] = f"file://{self.data_dir / 'assets' / base_name}.png".replace("\\", "/")
                     skin_operators.append(skin_character)
                     continue
                 
@@ -666,7 +664,7 @@ class MyPlugin(Star):
                         langs.append({"code": "skin", "display": "皮肤"})
                 
                 # 获取角色头像
-                avatar_url = f"file://{self.data_dir / "assets" / "{base_name}.png"}".replace("\\", "/")
+                avatar_url = f"file://{self.data_dir / 'assets' / base_name}.png".replace("\\", "/")
                 
                 operators.append({
                     "name": char,
