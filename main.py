@@ -576,19 +576,8 @@ class MyPlugin(Star):
             yield event.plain_result(f"正在播放 {character} 的语音：{voice_name}")
             voice_path = self._get_voice_path(character, voice_name, lang)
             if not voice_path:
-                # 如果是皮肤角色，尝试直接使用skin语言
-                if is_skin_character and lang != "skin":
-                    voice_path = self._get_voice_path(character, voice_name, "skin")
-                    
-                
-                # 如果仍然找不到，尝试在基础角色的skin目录下查找
-                if not voice_path and is_skin_character:
-                    base_character = character.replace("皮肤", "")
-                    voice_path = self._get_voice_path(base_character, voice_name, "skin")
-                
-                if not voice_path:
-                    yield event.plain_result("语音文件不存在")
-                    return
+                yield event.plain_result("语音文件不存在")
+                return
             
             async for msg in self.send_voice_message(event, str(voice_path)):
                 yield msg
