@@ -90,7 +90,7 @@ class MyPlugin(Star):
             asyncio.create_task(self.ensure_assets())
             
         except Exception as e:
-            print(f"插件初始化失败: {e}")
+            self.logger.error(f"插件初始化失败: {e}")
             raise
 
     def _handle_config_schema(self) -> None:
@@ -371,7 +371,7 @@ class MyPlugin(Star):
         try:
             encoded_character = character.replace("皮肤", "")
             wiki_url = f"https://prts.wiki/w/{encoded_character}/语音记录"
-            print(f"正在访问URL: {wiki_url}")
+            self.logger.info(f"正在访问URL: {wiki_url}")
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"https://prts.wiki/w/{character}/语音记录") as resp:
                     soup = BeautifulSoup(await resp.text(), 'html.parser')
@@ -379,12 +379,12 @@ class MyPlugin(Star):
                     # 关键解析步骤
                     voice_div = soup.find('div', {'data-voice-base': True})
                     if not voice_div:
-                        print("未找到语音数据div")
+                        self.logger.error("未找到语音数据div")
                         return None
 
                     # 提取并处理data-voice-base
                     voice_data = voice_div['data-voice-base']
-                    print(f"原始语音数据: {voice_data}")  # 调试输出
+                    self.logger.debug(f"原始语音数据: {voice_data}")  # 调试输出
 
                     # 解析为结构化字典
                     result = {}
@@ -400,11 +400,11 @@ class MyPlugin(Star):
                         if 'char_' in path and '语音key' not in result:
                             result['语音key'] = re.search(r'char_\d+_\w+', path).group(0)
 
-                    print(f"解析结果: {result}")
+                    self.logger.info(f"解析结果: {result}")
                     return result
 
         except Exception as e:
-            print(f"解析失败: {e}")
+            self.logger.error(f"解析失败: {e}")
             return None
    
     async def fetch_character_voices(self, character: str) -> Tuple[bool, str]:
