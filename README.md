@@ -30,7 +30,9 @@
 
 - `auto_download`: 是否自动下载未找到的角色语音（默认：true）
 - `auto_download_skin`: 是否自动下载角色的皮肤语音（默认：true）
-- `default_language_rank`: 语言优先级设置（如 123，1:方言，2:中文，3:日语）
+- `default_language_rank`: 语言优先级设置（如 123，1:方言, 2:汉语, 3:日语, 4:英语, 5:韩语, 6:意大利语）
+- `auto_download_language`: 设置需要自动下载的语言
+- `enable_log_output`: 是否启用详细日志输出（默认：false）
 
 ## 目录结构
 
