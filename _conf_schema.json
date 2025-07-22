@@ -22,11 +22,5 @@
       "description": "设置需要自动下载的语言     1:方言, 2:汉语, 3:日语, 4:英语, 5:韩语,6:意大利语",
       "hint": "将对应的语音序号优先级输入，默认为123",
       "default": "123"
-  },
-  "enable_log_output": {
-      "description": "是否在终端输出详细日志信息",
-      "type": "bool",
-      "hint": "true/false",
-      "default": false
   }
 } 

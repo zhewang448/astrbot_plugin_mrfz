@@ -8,14 +8,14 @@ from typing import List, Optional, Dict, Tuple
 import aiohttp
 from bs4 import BeautifulSoup
 from jinja2 import Environment, FileSystemLoader
-import logging
 from PIL import Image as PILImage, ImageDraw, ImageFont
 from astrbot.api.all import *
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.api.star import StarTools
+from astrbot.api import logger
 
-@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "3.3.4")
+@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "3.3.5")
 class MyPlugin(Star):
     # HTTP请求头
     DEFAULT_HEADERS = {
@@ -36,24 +36,13 @@ class MyPlugin(Star):
         """
         try:
             super().__init__(context)
-            
-            # 初始化logger
-            self.logger = logging.getLogger("astrbot_plugin_mrfz")
-            # 确保logger有处理器
-            if not self.logger.handlers:
-                handler = logging.StreamHandler()
-                formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-                handler.setFormatter(formatter)
-                self.logger.addHandler(handler)
-                self.logger.setLevel(logging.INFO)
-            
-            self.logger.info("明日方舟语音插件初始化中...")
+            logger.info("明日方舟语音插件初始化中...")#使用框架自带logger
             
             # 初始化目录
             self.data_dir = StarTools.get_data_dir("astrbot_plugin_mrfz")
             self.voices_dir = self.data_dir / "voices"
             self.assets_dir = self.data_dir / "assets"
-            self.logger.info(f"资源目录路径: {self.assets_dir}")
+            logger.info(f"资源目录路径: {self.assets_dir}")
             self.voice_index: Dict[str, List[str]] = {}
             self.plugin_dir = os.path.dirname(__file__)
             
@@ -72,16 +61,8 @@ class MyPlugin(Star):
             self.auto_download_skin = self.config.get("auto_download_skin", True)
             self.language_list = ["fy", "cn", "jp","us",'kr','it']  # 1:方言, 2:汉语, 3:日语, 4:英语, 5:韩语, 6:意大利语
             self.default_language_rank = self.config.get("default_language_rank", "123456")
-            self.enable_log_output = self.config.get("enable_log_output", False)
             self.auto_download_language = self.config.get("auto_download_language", "123")
             self.language_dic = {"中文-普通话":"cn","英语":"us","日语":"jp","韩语":"kr","中文-方言":"fy","意大利语":"it","fy":"1","cn":"2","jp":"3","us":"4","kr":"5","it":"6"}
-            # 根据配置设置日志级别
-            if not self.enable_log_output:
-                self.logger.setLevel(logging.ERROR)  # 只输出错误信息
-                self.logger.info("已禁用详细日志输出")
-            else:
-                self.logger.setLevel(logging.INFO)
-                self.logger.info("已启用详细日志输出")
             # 扫描已有文件
             self.scan_voice_files()
             
@@ -90,7 +71,7 @@ class MyPlugin(Star):
             asyncio.create_task(self.ensure_assets())
             
         except Exception as e:
-            self.logger.error(f"插件初始化失败: {e}")
+            logger.error(f"插件初始化失败: {e}")
             raise
 
     def _handle_config_schema(self) -> None:
@@ -119,12 +100,6 @@ class MyPlugin(Star):
                 "description": "设置需要自动下载的语言     1:方言, 2:汉语, 3:日语, 4:英语, 5:韩语, 6:意大利语",
                 "hint": "将对应的语音序号优先级输入，默认为123",
                 "default": "123"
-            },
-            "enable_log_output": {
-                "description": "是否在终端输出详细日志信息",
-                "type": "bool",
-                "hint": "true/false",
-                "default": False
             }
         } 
         
@@ -169,7 +144,7 @@ class MyPlugin(Star):
         
         # 保存索引到文件
         self._save_voice_index()
-        self.logger.info(f"扫描到{len(self.voice_index)}个角色的语音文件")
+        logger.info(f"扫描到{len(self.voice_index)}个角色的语音文件")
     
     def _save_voice_index(self) -> None:
         """保存语音索引到文件"""
@@ -177,9 +152,9 @@ class MyPlugin(Star):
             voice_index_file = self.data_dir / "voice_index.json"
             with open(voice_index_file, "w", encoding="utf-8") as f:
                 json.dump(self.voice_index, f, ensure_ascii=False, indent=2)
-            self.logger.info(f"语音索引已保存到 {voice_index_file}")
+            logger.info(f"语音索引已保存到 {voice_index_file}")
         except Exception as e:
-            self.logger.error(f"保存语音索引失败: {str(e)}")
+            logger.error(f"保存语音索引失败: {str(e)}")
 
     def _get_character_dir(self, character: str) -> Path:
         """获取角色语音目录"""
@@ -199,7 +174,7 @@ class MyPlugin(Star):
         Returns:
             语音文件路径，如果未找到则返回None
         """
-        self.logger.info(f"尝试获取语音路径: 角色={character}, 语音={voice_name}, 语言={language}")
+        logger.info(f"尝试获取语音路径: 角色={character}, 语音={voice_name}, 语言={language}")
         
         # 检查是否是皮肤角色
         is_skin_character = character.endswith("皮肤")
@@ -209,18 +184,18 @@ class MyPlugin(Star):
         base_path=char_dir / language if not is_skin_character else char_dir / "skin" / language
         path =base_path / f"{voice_name}.wav"
         if path.exists():
-            self.logger.info(f"找到语音文件(其他语言): {path}")
+            logger.info(f"找到语音文件(其他语言): {path}")
             return path
-        self.logger.warning(f"未找到语音文件: {character} - {voice_name} - {language}")
+        logger.warning(f"未找到语音文件: {character} - {voice_name} - {language}")
         return None
 
     async def ensure_assets(self):
         """确保必要的资源文件存在，如不存在则下载
         """
-        self.logger.info("====== ensure_assets 开始执行 ======")
+        logger.info("====== ensure_assets 开始执行 ======")
         
         # 先扫描语音文件，确保voice_index是最新的
-        self.logger.info("扫描语音文件...")
+        logger.info("扫描语音文件...")
         self.scan_voice_files()
         
         # 获取已经下载的语音列表中的角色
@@ -229,33 +204,33 @@ class MyPlugin(Star):
         # 1. 从内存中的voice_index获取角色
         if self.voice_index:
             voice_characters = list(self.voice_index.keys())
-            self.logger.info(f"从内存中的voice_index找到{len(voice_characters)}个角色")
+            logger.info(f"从内存中的voice_index找到{len(voice_characters)}个角色")
         # 如果没有找到角色，直接返回
         if not voice_characters:
-            self.logger.warning("没有找到需要下载头像的角色，跳过头像下载")
+            logger.warning("没有找到需要下载头像的角色，跳过头像下载")
             return True
             
         # 下载所有已有语音干员的头像
-        self.logger.info("开始下载角色头像...")
+        logger.info("开始下载角色头像...")
         
         # 获取头像映射
         try:
             avatar_map = await self._fetch_all_avatar_mappings()
-            self.logger.info(f"获取到的头像映射数量：{len(avatar_map)}")
+            logger.info(f"获取到的头像映射数量：{len(avatar_map)}")
             
             # 检查已有语音的干员并下载头像
             for character in voice_characters:
                 await self.download_avatar(character.replace("皮肤", ""), avatar_map)
             
-            self.logger.info(f"头像下载完成，成功下载{len(avatar_map)}个头像")
+            logger.info(f"头像下载完成，成功下载{len(avatar_map)}个头像")
         except Exception as e:
-            self.logger.error(f"[ensure_assets] 下载头像过程出错: {str(e)}")
+            logger.error(f"[ensure_assets] 下载头像过程出错: {str(e)}")
         
-        self.logger.info("====== ensure_assets 执行完毕 ======")
+        logger.info("====== ensure_assets 执行完毕 ======")
         return True
     async def download_avatar(self,character, avatar_map):
         avatar_file = self.assets_dir / f"{character}.png"
-        self.logger.info(f"检查角色头像：{avatar_file}")
+        logger.info(f"检查角色头像：{avatar_file}")
         if not avatar_file.exists():
             if character in avatar_map:
                 avatar_url = avatar_map[character]
@@ -265,19 +240,19 @@ class MyPlugin(Star):
                             if response.status == 200:
                                 with open(avatar_file, "wb") as f:
                                     f.write(await response.read())
-                                self.logger.info(f"{character}头像下载成功")
+                                logger.info(f"{character}头像下载成功")
                             else:
-                                self.logger.warning(f"{character}头像下载失败，状态码：{response.status}")
+                                logger.warning(f"{character}头像下载失败，状态码：{response.status}")
                 except Exception as e:
-                    self.logger.error(f"[ensure_assets] {character}头像下载出错: {avatar_url}")
+                    logger.error(f"[ensure_assets] {character}头像下载出错: {avatar_url}")
             else:
-                self.logger.warning(f"[ensure_assets] 未找到角色 {character} 的头像URL")
+                logger.warning(f"[ensure_assets] 未找到角色 {character} 的头像URL")
         else:
-            self.logger.info(f"{character}头像已存在")
+            logger.info(f"{character}头像已存在")
     async def fetch_operator_avatar(self, op_name: str) -> Tuple[str, str]:
             # 直接访问文件页面获取真实URL
             file_page_url = f"https://prts.wiki/w/文件:头像_{op_name}.png"
-            self.logger.debug(f"访问文件页面: {file_page_url}")
+            logger.debug(f"访问文件页面: {file_page_url}")
             
             async with aiohttp.ClientSession() as session:
                 async with session.get(file_page_url, headers=self.DEFAULT_HEADERS, timeout=10) as response:
@@ -288,11 +263,11 @@ class MyPlugin(Star):
                         image_url_match = re.search(r'<meta property="og:image" content="([^"]+)"', file_page_html)
                         if image_url_match:
                             image_url = image_url_match.group(1)
-                            self.logger.debug(f"获取到干员{op_name}头像: {image_url}")
+                            logger.debug(f"获取到干员{op_name}头像: {image_url}")
                             return op_name,image_url
             
             # 如果没找到，使用固定的无头像图片
-            self.logger.debug(f"未找到干员 {op_name} 的头像，使用默认头像")
+            logger.debug(f"未找到干员 {op_name} 的头像，使用默认头像")
             return op_name,f"{self.plugin_dir}/assets/无头像.png"
     async def download_voice(self, character: str, voice_url: str, language: str, description: str) -> Tuple[bool, str]:
         """下载单个语音文件
@@ -371,7 +346,7 @@ class MyPlugin(Star):
         try:
             encoded_character = character.replace("皮肤", "")
             wiki_url = f"https://prts.wiki/w/{encoded_character}/语音记录"
-            self.logger.info(f"正在访问URL: {wiki_url}")
+            logger.info(f"正在访问URL: {wiki_url}")
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"https://prts.wiki/w/{character}/语音记录") as resp:
                     soup = BeautifulSoup(await resp.text(), 'html.parser')
@@ -379,12 +354,12 @@ class MyPlugin(Star):
                     # 关键解析步骤
                     voice_div = soup.find('div', {'data-voice-base': True})
                     if not voice_div:
-                        self.logger.error("未找到语音数据div")
+                        logger.error("未找到语音数据div")
                         return None
 
                     # 提取并处理data-voice-base
                     voice_data = voice_div['data-voice-base']
-                    self.logger.debug(f"原始语音数据: {voice_data}")  # 调试输出
+                    logger.debug(f"原始语音数据: {voice_data}")  # 调试输出
 
                     # 解析为结构化字典
                     result = {}
@@ -400,11 +375,11 @@ class MyPlugin(Star):
                         if 'char_' in path and '语音key' not in result:
                             result['语音key'] = re.search(r'char_\d+_\w+', path).group(0)
 
-                    self.logger.info(f"解析结果: {result}")
+                    logger.info(f"解析结果: {result}")
                     return result
 
         except Exception as e:
-            self.logger.error(f"解析失败: {e}")
+            logger.error(f"解析失败: {e}")
             return None
    
     async def fetch_character_voices(self, character: str) -> Tuple[bool, str]:
@@ -422,7 +397,7 @@ class MyPlugin(Star):
             base_character = character.replace("皮肤", "") 
             # 先确保语音索引是最新的
             self.scan_voice_files()
-            self.logger.info(f"开始获取角色 {character} 的语音文件")
+            logger.info(f"开始获取角色 {character} 的语音文件")
             
             # 获取角色ID
             char_id_list = await self.get_character_id(character)
@@ -435,11 +410,11 @@ class MyPlugin(Star):
                     continue
                 if '(' in lang and ')' in lang:
                     if not self.auto_download_skin:
-                        self.logger.info(f"跳过{lang}语言，因为自动下载皮肤语音功能未启用")
+                        logger.info(f"跳过{lang}语言，因为自动下载皮肤语音功能未启用")
                         continue
                     lang = lang.split('(')[0].strip()
                     character = f"{base_character}皮肤"
-                self.logger.info(f"开始下载{lang}语音...")
+                logger.info(f"开始下载{lang}语音...")
                 desc_idx = 0  # 当前描述索引
                 file_idx = 1  # 当前文件索引
                 # 遍历处理所有可能的语音文件
@@ -458,28 +433,28 @@ class MyPlugin(Star):
                             async with session.head(voice_url, headers=self.DEFAULT_HEADERS) as response:
                                 if response.status == 200:
                                     # 文件存在，尝试下载
-                                    self.logger.info(f"正在下载: {lang}语音{file_idx} ({voice_url}) -> {description}.wav")
+                                    logger.info(f"正在下载: {lang}语音{file_idx} ({voice_url}) -> {description}.wav")
                                     success, message = await self.download_voice(character, voice_url, lang, description)
                                     if success:
                                         total_voices += 1
                                         desc_idx += 1  # 只有下载成功才移动到下一个描述
-                                        self.logger.info(f"成功下载: {lang}语音{file_idx}")
+                                        logger.info(f"成功下载: {lang}语音{file_idx}")
                                     else:
                                         failed_voices += 1
-                                        self.logger.warning(f"下载失败 ({lang}语音{file_idx}): {message}")
+                                        logger.warning(f"下载失败 ({lang}语音{file_idx}): {message}")
                                 else:
-                                    self.logger.info(f"语音{file_idx}不存在，跳过")
+                                    logger.info(f"语音{file_idx}不存在，跳过")
                     except Exception as e:
-                        self.logger.error(f"下载{lang}语音{file_idx}时出错: {str(e)}")
+                        logger.error(f"下载{lang}语音{file_idx}时出错: {str(e)}")
                         failed_voices += 1
                     
                     file_idx += 1  # 无论成功与否都尝试下一个文件
             
             # 在下载完成后立即扫描更新索引
             if total_voices > 0 :
-                self.logger.info(f"下载完成，开始扫描语音文件更新索引...")
+                logger.info(f"下载完成，开始扫描语音文件更新索引...")
                 self.scan_voice_files()
-                self.logger.info(f"语音索引更新完成")
+                logger.info(f"语音索引更新完成")
             
             # 构建返回消息
             result_msg = []
@@ -493,7 +468,7 @@ class MyPlugin(Star):
             return True, "，".join(result_msg)
             
         except Exception as e:
-            self.logger.error(f"获取语音时出错: {str(e)}")
+            logger.error(f"获取语音时出错: {str(e)}")
             return False, f"获取语音失败: {str(e)}"
 
     async def choose_language(self, character: str, is_skin_character: bool) -> str:
@@ -516,16 +491,16 @@ class MyPlugin(Star):
                             lang = "nodownload"
                 except (ValueError, IndexError):
                     continue
-            self.logger.info(f"确定使用语言: {lang}")
+            logger.info(f"确定使用语言: {lang}")
             return lang
             
-    @filter.command("mrfz")
+    @filter.command("mrfz", alias = {'播放明日方舟语音', '播放方舟语音'})
     async def mrfz_handler(self, event: AstrMessageEvent, character: str = None, voice_name: str = None, language: str = None):
         """/mrfz [角色名] [语音名] [语言] 随机播放指定角色的语音。不指定语音名则随机播放。"""
         try:
             # 确保语音索引是最新的（只在开始时扫描一次）
             self.scan_voice_files()
-            self.logger.info(f"开始处理mrfz命令: 角色={character}, 语音={voice_name}, 语言={language}")
+            logger.info(f"开始处理mrfz命令: 角色={character}, 语音={voice_name}, 语言={language}")
             
             # 检查是否是皮肤角色
             is_skin_character = character and character.endswith("皮肤")
@@ -536,7 +511,7 @@ class MyPlugin(Star):
                     yield event.plain_result("还没有任何角色的语音文件")
                     return
                 character = random.choice(list(self.voice_index.keys()))
-                self.logger.info(f"未指定角色，随机选择 {character}")
+                logger.info(f"未指定角色，随机选择 {character}")
             
             # 确定需要使用的语言
             if not character in self.voice_index:
@@ -558,7 +533,7 @@ class MyPlugin(Star):
                     yield event.plain_result(f"未找到角色 {character} 的{language}语音文件。自动下载已禁用，请使用 /mrfz_fetch 手动获取。")
                     return
                 
-                self.logger.info(f"未找到角色 {character} 的语音文件，尝试自动下载")
+                logger.info(f"未找到角色 {character} 的语音文件，尝试自动下载")
                 yield event.plain_result(f"未找到角色 {character} 的语音文件，正在自动获取...")
                 
                 # 尝试下载
@@ -583,10 +558,10 @@ class MyPlugin(Star):
                 yield msg
                 
         except Exception as e:
-            self.logger.error(f"播放语音时出错: {str(e)}", exc_info=True)
+            logger.error(f"播放语音时出错: {str(e)}", exc_info=True)
             yield event.plain_result(f"播放语音时出错：{str(e)}")
 
-    @filter.command("mrfz_list")
+    @filter.command("mrfz_list", alias = {'明日方舟语音列表', '方舟语音列表'})
     async def mrfz_list_handler(self, event: AstrMessageEvent):
         """处理语音列表命令"""
         try:
@@ -671,7 +646,7 @@ class MyPlugin(Star):
             # 如果模板文件不存在，提示错误
             template_path = os.path.join(self.plugin_dir, template_file)
             if not os.path.exists(template_path):
-                self.logger.error(f"模板文件不存在: {template_path}")
+                logger.error(f"模板文件不存在: {template_path}")
                 yield event.plain_result("生成列表失败: 模板文件不存在")
                 return
             
@@ -696,11 +671,11 @@ class MyPlugin(Star):
             with open(html_path, 'w', encoding='utf-8') as f:
                 f.write(html)
             
-            self.logger.info(f"HTML已保存到: {html_path}")
+            logger.info(f"HTML已保存到: {html_path}")
             
             # 直接使用PIL生成图片
             try:
-                self.logger.info("开始使用PIL生成图片...")
+                logger.info("开始使用PIL生成图片...")
                 
                 # 设置图片基本参数
                 img_width = 800
@@ -738,7 +713,7 @@ class MyPlugin(Star):
                 # 额外增加一些边距，防止内容被截断
                 total_height += 50
                 
-                self.logger.info(f"计算图片高度: 标题={title_height}, 语音类型={voice_types_height}, 干员列表={ops_height}, 皮肤列表={skin_ops_height}, 底部={footer_height}, 总计={total_height}")
+                logger.info(f"计算图片高度: 标题={title_height}, 语音类型={voice_types_height}, 干员列表={ops_height}, 皮肤列表={skin_ops_height}, 底部={footer_height}, 总计={total_height}")
                 
                 # 创建图片
                 img = PILImage.new('RGB', (img_width, total_height), color=(30, 33, 41))
@@ -750,7 +725,7 @@ class MyPlugin(Star):
                     section_font = ImageFont.truetype("simhei.ttf", 22)
                     normal_font = ImageFont.truetype("simhei.ttf", 18)
                 except:
-                    self.logger.warning("无法加载TrueType字体，使用默认字体")
+                    logger.warning("无法加载TrueType字体，使用默认字体")
                     title_font = ImageFont.load_default()
                     section_font = title_font
                     normal_font = title_font
@@ -824,16 +799,16 @@ class MyPlugin(Star):
                                         avatar_img = PILImage.open(str(local_avatar_path)).resize((32, 32))
                                         # 缓存头像
                                         avatar_cache[op['name']] = avatar_img
-                                        self.logger.info(f"使用本地头像: {op['name']}")
+                                        logger.info(f"使用本地头像: {op['name']}")
                                     except Exception as e:
-                                        self.logger.warning(f"加载本地头像失败: {op['name']} - {str(e)}")
+                                        logger.warning(f"加载本地头像失败: {op['name']} - {str(e)}")
                                 else:
                                     # 本地没有，从网络获取
                                     # 获取头像URL
                                     avatar_url = await self.fetch_operator_avatar(op['name'])
-                                    self.logger.info(f"成功获取头像: {op['name']}")
+                                    logger.info(f"成功获取头像: {op['name']}")
                         except Exception as e:
-                            self.logger.warning(f"获取头像URL失败: {op['name']} - {str(e)}")
+                            logger.warning(f"获取头像URL失败: {op['name']} - {str(e)}")
                         
                         # 绘制头像
                         avatar_x = padding + 10
@@ -848,7 +823,7 @@ class MyPlugin(Star):
                             img.paste(avatar_img, (avatar_x, avatar_y), 
                                      avatar_img if avatar_img.mode == 'RGBA' else None)
                         except Exception as e:
-                            self.logger.warning(f"粘贴头像失败: {op['name']} - {str(e)}")
+                            logger.warning(f"粘贴头像失败: {op['name']} - {str(e)}")
                         
                         # 干员名称
                         name_x = padding + 60
@@ -920,9 +895,9 @@ class MyPlugin(Star):
                                         # 缓存头像
                                         avatar_cache[base_name] = avatar_img
                                     except Exception as e:
-                                        self.logger.warning(f"加载皮肤角色头像失败: {base_name} - {str(e)}")
+                                        logger.warning(f"加载皮肤角色头像失败: {base_name} - {str(e)}")
                         except Exception as e:
-                            self.logger.warning(f"获取皮肤角色头像URL失败: {op['name']} - {str(e)}")
+                            logger.warning(f"获取皮肤角色头像URL失败: {op['name']} - {str(e)}")
                         
                         # 绘制头像
                         avatar_x = padding + 10
@@ -937,7 +912,7 @@ class MyPlugin(Star):
                             img.paste(avatar_img, (avatar_x, avatar_y), 
                                      avatar_img if avatar_img.mode == 'RGBA' else None)
                         except Exception as e:
-                            self.logger.warning(f"粘贴皮肤角色头像失败: {op['name']} - {str(e)}")
+                            logger.warning(f"粘贴皮肤角色头像失败: {op['name']} - {str(e)}")
                         
                         # 干员名称 - 皮肤角色使用金色调
                         name_x = padding + 60
@@ -982,17 +957,17 @@ class MyPlugin(Star):
                 # 保存图片
                 output_path = os.path.join(self.plugin_dir, 'list.png')
                 img.save(output_path)
-                self.logger.info(f"图片生成完成，保存到: {output_path}")
+                logger.info(f"图片生成完成，保存到: {output_path}")
                 
                 # 发送图片
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                     yield event.image_result(output_path)
                 else:
-                    self.logger.error(f"图片文件未生成或大小为0: {output_path}")
+                    logger.error(f"图片文件未生成或大小为0: {output_path}")
                     raise FileNotFoundError("图片文件未生成")
                     
             except Exception as e:
-                self.logger.error(f"生成图片时出错: {str(e)}")
+                logger.error(f"生成图片时出错: {str(e)}")
                 
                 # 发送文本格式的干员列表作为备选
                 text_result = "【明日方舟语音列表】\n\n"
@@ -1033,10 +1008,10 @@ class MyPlugin(Star):
                 yield event.plain_result(text_result)
                 
         except Exception as e:
-            self.logger.error(f"生成语音列表图片时出错: {str(e)}")
+            logger.error(f"生成语音列表图片时出错: {str(e)}")
             yield event.plain_result(f"生成语音列表图片时出错：{str(e)}")
 
-    @filter.command("mrfz_fetch")
+    @filter.command("mrfz_fetch" ,alias = {'明日方舟下载语音', '方舟下载语音'})
     async def mrfz_fetch_handler(self, event: AstrMessageEvent, character: str):
         """获取干员语音文件"""
         try:
@@ -1053,7 +1028,7 @@ class MyPlugin(Star):
                 yield event.plain_result(f"获取失败: {result}")
 
         except Exception as e:
-            self.logger.error(f"获取语音文件时出错: {str(e)}", exc_info=True)
+            logger.error(f"获取语音文件时出错: {str(e)}", exc_info=True)
             yield event.plain_result(f"获取语音文件时出错：{str(e)}")
 
     async def send_voice_message(self, event: AstrMessageEvent, voice_file_path: str):
@@ -1078,10 +1053,10 @@ class MyPlugin(Star):
             if self.voice_index:
                 for op_name in self.voice_index.keys():
                     operator_names.add(op_name)
-            self.logger.info(f"找到{len(operator_names)}个干员名称")
+            logger.info(f"找到{len(operator_names)}个干员名称")
             
             # 根据干员名称获取头像URL
-            self.logger.info(f"开始使用文件页面格式获取干员头像...")
+            logger.info(f"开始使用文件页面格式获取干员头像...")
             # 创建所有干员头像获取任务
             tasks = []
             for op_name in operator_names:
@@ -1100,11 +1075,15 @@ class MyPlugin(Star):
                     if "头像_无头像.png" in image_url:
                         not_found_count += 1
             
-            self.logger.info(f"仍有{not_found_count}个干员未找到头像")
-            self.logger.info(f"最终获取到{len(avatar_mappings)}个干员头像链接")
+            logger.info(f"仍有{not_found_count}个干员未找到头像")
+            logger.info(f"最终获取到{len(avatar_mappings)}个干员头像链接")
             return avatar_mappings
             
         except Exception as e:
-            self.logger.error(f"获取头像映射时出错: {str(e)}")
+            logger.error(f"获取头像映射时出错: {str(e)}")
             return {}
-            
+    @filter.command("mrfz_help" ,alias = {'明日方舟语音帮助', '方舟语音帮助'})
+    async def mrfz_help_handler(self, event: AstrMessageEvent):
+        """显示帮助信息"""
+        help_path = os.path.join(self.plugin_dir, "help.png")
+        yield event.image_result(help_path)
