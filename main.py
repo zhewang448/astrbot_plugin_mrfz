@@ -230,7 +230,7 @@ class MyPlugin(Star):
         return True
     async def download_avatar(self,character, avatar_map):
         avatar_file = self.assets_dir / f"{character}.png"
-        logger.info(f"检查角色头像：{avatar_file}")
+        # logger.info(f"检查角色头像：{avatar_file}")
         if not avatar_file.exists():
             if character in avatar_map:
                 avatar_url = avatar_map[character]
@@ -240,7 +240,7 @@ class MyPlugin(Star):
                             if response.status == 200:
                                 with open(avatar_file, "wb") as f:
                                     f.write(await response.read())
-                                logger.info(f"{character}头像下载成功")
+                                # logger.info(f"{character}头像下载成功")
                             else:
                                 logger.warning(f"{character}头像下载失败，状态码：{response.status}")
                 except Exception as e:
@@ -248,7 +248,8 @@ class MyPlugin(Star):
             else:
                 logger.warning(f"[ensure_assets] 未找到角色 {character} 的头像URL")
         else:
-            logger.info(f"{character}头像已存在")
+            # logger.info(f"{character}头像已存在")
+            pass
     async def fetch_operator_avatar(self, op_name: str) -> Tuple[str, str]:
             # 直接访问文件页面获取真实URL
             file_page_url = f"https://prts.wiki/w/文件:头像_{op_name}.png"
@@ -263,7 +264,7 @@ class MyPlugin(Star):
                         image_url_match = re.search(r'<meta property="og:image" content="([^"]+)"', file_page_html)
                         if image_url_match:
                             image_url = image_url_match.group(1)
-                            logger.debug(f"获取到干员{op_name}头像: {image_url}")
+                            # logger.debug(f"获取到干员{op_name}头像: {image_url}")
                             return op_name,image_url
             
             # 如果没找到，使用固定的无头像图片
@@ -433,17 +434,18 @@ class MyPlugin(Star):
                             async with session.head(voice_url, headers=self.DEFAULT_HEADERS) as response:
                                 if response.status == 200:
                                     # 文件存在，尝试下载
-                                    logger.info(f"正在下载: {lang}语音{file_idx} ({voice_url}) -> {description}.wav")
+                                    # logger.info(f"正在下载: {lang}语音{file_idx} ({voice_url}) -> {description}.wav")
                                     success, message = await self.download_voice(character, voice_url, lang, description)
                                     if success:
                                         total_voices += 1
                                         desc_idx += 1  # 只有下载成功才移动到下一个描述
-                                        logger.info(f"成功下载: {lang}语音{file_idx}")
+                                        # logger.info(f"成功下载: {lang}语音{file_idx}")
                                     else:
                                         failed_voices += 1
                                         logger.warning(f"下载失败 ({lang}语音{file_idx}): {message}")
                                 else:
-                                    logger.info(f"语音{file_idx}不存在，跳过")
+                                    # logger.info(f"语音{file_idx}不存在，跳过")
+                                    pass
                     except Exception as e:
                         logger.error(f"下载{lang}语音{file_idx}时出错: {str(e)}")
                         failed_voices += 1
@@ -578,8 +580,8 @@ class MyPlugin(Star):
             # 2. 已下载干员及语言
             operators = []  # 普通角色
             skin_operators = []  # 皮肤角色
-            
             for char in self.voice_index:
+                base_name = char # 基础角色名
                 # 如果角色名以"皮肤"结尾，放入皮肤列表
                 if char.endswith("皮肤"):
                     skin_character = {
@@ -799,7 +801,7 @@ class MyPlugin(Star):
                                         avatar_img = PILImage.open(str(local_avatar_path)).resize((32, 32))
                                         # 缓存头像
                                         avatar_cache[op['name']] = avatar_img
-                                        logger.info(f"使用本地头像: {op['name']}")
+                                        # logger.info(f"使用本地头像: {op['name']}")
                                     except Exception as e:
                                         logger.warning(f"加载本地头像失败: {op['name']} - {str(e)}")
                                 else:
@@ -1011,7 +1013,7 @@ class MyPlugin(Star):
             logger.error(f"生成语音列表图片时出错: {str(e)}")
             yield event.plain_result(f"生成语音列表图片时出错：{str(e)}")
 
-    @filter.command("mrfz_fetch" ,alias = {'明日方舟下载语音', '方舟下载语音'})
+    @filter.command("mrfz_fetch" ,alias = {'明日方舟下载语音', '方舟下载语音', '方舟语音下载', '明日方舟语音下载'})
     async def mrfz_fetch_handler(self, event: AstrMessageEvent, character: str):
         """获取干员语音文件"""
         try:
@@ -1075,8 +1077,8 @@ class MyPlugin(Star):
                     if "头像_无头像.png" in image_url:
                         not_found_count += 1
             
-            logger.info(f"仍有{not_found_count}个干员未找到头像")
-            logger.info(f"最终获取到{len(avatar_mappings)}个干员头像链接")
+            logger.info(f"仍有{not_found_count}个干员未找到头像") if not_found_count > 0 else None
+            # logger.info(f"最终获取到{len(avatar_mappings)}个干员头像链接")
             return avatar_mappings
             
         except Exception as e:
