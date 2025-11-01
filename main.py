@@ -16,7 +16,7 @@ from astrbot.api.star import StarTools
 from astrbot.api import logger
 
 
-@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "3.3.5")
+@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "3.3.6")
 class MyPlugin(Star):
     # HTTP请求头
     DEFAULT_HEADERS = {
