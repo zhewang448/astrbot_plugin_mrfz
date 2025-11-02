@@ -16,7 +16,7 @@ from astrbot.api.star import StarTools
 from astrbot.api import logger
 
 
-@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "3.3.6")
+@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "3.3.7")
 class MyPlugin(Star):
     # HTTP请求头
     DEFAULT_HEADERS = {
@@ -906,10 +906,13 @@ class MyPlugin(Star):
 
                 # 尝试加载字体，如果失败使用默认字体
                 try:
-                    title_font = ImageFont.truetype("simhei.ttf", 28)
-                    section_font = ImageFont.truetype("simhei.ttf", 22)
-                    normal_font = ImageFont.truetype("simhei.ttf", 18)
+                    default_font_path = f"{self.plugin_dir}/simhei.ttf"
+                    title_font = ImageFont.truetype(default_font_path, 28)
+                    section_font = ImageFont.truetype(default_font_path, 22)
+                    normal_font = ImageFont.truetype(default_font_path, 18)
+                    logger.debug("字体加载成功")
                 except Exception:
+                    logger.info("字体加载失败")
                     title_font = ImageFont.load_default()
                     section_font = title_font
                     normal_font = title_font
