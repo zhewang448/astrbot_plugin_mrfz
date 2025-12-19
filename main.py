@@ -2,6 +2,7 @@ import os
 import json
 import random
 import asyncio
+import difflib
 from pathlib import Path
 from astrbot.api.all import *
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
@@ -14,7 +15,7 @@ from .data_source import VoiceManager
 from .renderer import VoiceRenderer
 
 
-@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "3.4.2")
+@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "3.4.3")
 class MyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -29,7 +30,9 @@ class MyPlugin(Star):
 
         # 2. 初始化核心模块
         self.voice_mgr = VoiceManager(self.data_dir, self.plugin_dir)
-        self.renderer = VoiceRenderer(font_path="C:/Windows/Fonts/msyh.ttc")
+        self.renderer = VoiceRenderer(
+            font_path=self.plugin_dir / "SourceHanSerifCN-Medium-6.otf"
+        )
 
         # 3. 加载普通配置
         self.auto_download = self.config.get("auto_download", True)
@@ -66,6 +69,59 @@ class MyPlugin(Star):
                 json.dump(self.custom_mappings, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"保存自定义指令失败: {e}")
+
+    def _get_list_render_data(self) -> dict:
+        """[新增] 辅助方法：构建列表渲染所需的数据字典"""
+        # 扫描最新文件
+        self.voice_mgr.scan_voice_files()
+
+        # 组装数据供 Renderer 使用
+        render_data = {
+            "custom_commands": [],
+            "operators": [],
+            "skin_operators": [],
+            "voice_types": self.voice_mgr.VOICE_DESCRIPTIONS,
+        }
+
+        # 填充自定义指令
+        for trigger, info in self.custom_mappings.items():
+            base = info["character"].replace("皮肤", "")
+            render_data["custom_commands"].append(
+                {
+                    "trigger": trigger,
+                    "target": f"{info['character']} · {info['voice']}",
+                    "lang": info.get("lang", "Auto"),
+                    "avatar_path": str(self.voice_mgr.assets_dir / f"{base}.png"),
+                }
+            )
+
+        # 填充干员
+        for char, langs in self.voice_mgr.voice_index.items():
+            is_skin = char.endswith("皮肤")
+            base = char.replace("皮肤", "")
+
+            # 构建语言标签数据
+            lang_items = []
+            for l in langs:
+                l_conf = self.voice_mgr.LANGUAGE_MAP.get(
+                    l, {"name": l, "color": (100, 100, 100)}
+                )
+                lang_items.append(
+                    {"code": l, "display": l_conf["name"], "color": l_conf["color"]}
+                )
+
+            item = {
+                "name": char,
+                "avatar_path": str(self.voice_mgr.assets_dir / f"{base}.png"),
+                "languages": lang_items,
+            }
+
+            if is_skin:
+                render_data["skin_operators"].append(item)
+            else:
+                render_data["operators"].append(item)
+
+        return render_data
 
     def _handle_config_schema(self):
         """配置Schema定义 (移除 custom_mappings，因为它现在是独立文件)"""
@@ -189,57 +245,13 @@ class MyPlugin(Star):
     async def mrfz_list_handler(self, event: AstrMessageEvent):
         """生成样式化的语音列表"""
         yield event.plain_result("正在读取 PRTS 终端数据...")
-        self.voice_mgr.scan_voice_files()
 
-        # 组装数据供 Renderer 使用
-        render_data = {
-            "custom_commands": [],
-            "operators": [],
-            "skin_operators": [],
-            "voice_types": self.voice_mgr.VOICE_DESCRIPTIONS,
-        }
-
-        # 填充自定义指令
-        for trigger, info in self.custom_mappings.items():
-            base = info["character"].replace("皮肤", "")
-            render_data["custom_commands"].append(
-                {
-                    "trigger": trigger,
-                    "target": f"{info['character']} · {info['voice']}",
-                    "lang": info.get("lang", "Auto"),
-                    "avatar_path": str(self.voice_mgr.assets_dir / f"{base}.png"),
-                }
-            )
-
-        # 填充干员
-        for char, langs in self.voice_mgr.voice_index.items():
-            is_skin = char.endswith("皮肤")
-            base = char.replace("皮肤", "")
-
-            # 构建语言标签数据
-            lang_items = []
-            for l in langs:
-                l_conf = self.voice_mgr.LANGUAGE_MAP.get(
-                    l, {"name": l, "color": (100, 100, 100)}
-                )
-                lang_items.append(
-                    {"code": l, "display": l_conf["name"], "color": l_conf["color"]}
-                )
-
-            item = {
-                "name": char,
-                "avatar_path": str(self.voice_mgr.assets_dir / f"{base}.png"),
-                "languages": lang_items,
-            }
-
-            if is_skin:
-                render_data["skin_operators"].append(item)
-            else:
-                render_data["operators"].append(item)
+        # 使用辅助方法获取数据
+        render_data = self._get_list_render_data()
 
         # 渲染
         try:
-            # 调用 renderer 生成图片 (注意: voice_descriptions 已经作为参数传入)
+            # 调用 renderer 生成图片
             img_path = self.renderer.render_image(
                 render_data, self.voice_mgr.VOICE_DESCRIPTIONS
             )
@@ -306,9 +318,22 @@ class MyPlugin(Star):
     async def mrfz_help(self, event: AstrMessageEvent):
         """显示明日方舟语音插件帮助"""
         try:
+            # 1. 生成帮助图片
             help_img_path = await self.renderer.render_help()
-            chain = [Plain("已生成帮助文档：\n"), Image.fromFileSystem(help_img_path)]
+
+            # 2. 生成列表图片 (复用逻辑)
+            render_data = self._get_list_render_data()
+            list_img_path = self.renderer.render_image(
+                render_data, self.voice_mgr.VOICE_DESCRIPTIONS
+            )
+
+            # 3. 构造消息链发送两张图片
+            chain = [
+                Plain("已生成帮助文档与索引列表：\n"),
+                Image.fromFileSystem(help_img_path),
+                Image.fromFileSystem(list_img_path),
+            ]
             yield event.chain_result(chain)
         except Exception as e:
-            logger.error(f"帮助图片生成失败: {e}")
+            logger.error(f"帮助图片生成失败: {e}", exc_info=True)
             yield event.plain_result(f"帮助生成失败: {e}")
