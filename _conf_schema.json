@@ -22,5 +22,11 @@
       "description": "设置需要自动下载的语言     1:方言, 2:汉语, 3:日语, 4:英语, 5:韩语,6:意大利语",
       "hint": "将对应的语音序号优先级输入，默认为123",
       "default": "123"
+  },
+  "html_render_mode": {
+      "type": "bool",
+      "description": "打开HTML渲染模式",
+      "hint": "打开后会在本地生成HTML文件，方便查看list",
+      "default": false
   }
-} 
+}
