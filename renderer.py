@@ -53,8 +53,6 @@ class VoiceRenderer:
 
     async def render_help(self) -> str:
         """渲染帮助图片 (Dark Mode)"""
-        # ... (render_help 代码保持上一版不变，此处省略以聚焦重点) ...
-        # 如果需要我完整重复一遍 help 代码请告诉我
         return await self._render_help_logic()
 
     # 将 help 逻辑抽离以便复用，实际代码中你可以直接把上一版的 render_help 贴这就行
@@ -74,16 +72,16 @@ class VoiceRenderer:
         draw.line([(50, 85), (width - 50, 85)], fill=self.COLOR_ACCENT, width=2)
         commands = [
             (
-                "/mrfz [角色] [语音] [语言]",
+                "/mrfz [角色] [语音(可省略)] [语言(可省略)]",
                 "查询并播放语音 语言:中文/方言/日语/英语/韩语/意语",
                 "例: /mrfz 凯尔希 问候",
             ),
             ("/mrfz_list", "查看已下载干员/皮肤索引", "例: /mrfz_list"),
             ("/mrfz_fetch [角色名]", "从 PRTS Wiki 下载数据", "例: /mrfz_fetch 陈"),
             (
-                "/mrfz_bind [触发] [角色] [语音]",
+                "/mrfz_bind [触发] [角色] [语音] [语言(可省略)]",
                 "绑定快捷指令",
-                "例: /mrfz_bind 早安 阿米娅 问候",
+                "例: /mrfz_bind 早安 阿米娅 问候 中文",
             ),
             ("/mrfz_unbind [触发词]", "解绑快捷指令", "例: /mrfz_unbind 早安"),
         ]
@@ -265,7 +263,7 @@ class VoiceRenderer:
             "时装记录 // OUTFIT RECORDS", skin_operators, cur_y, is_skin=True
         )
 
-        # 5. 绘制支持的语音类型 (Voice Descriptions)
+        # 5. 绘制支持的语音类型
         draw.rectangle([(50, cur_y), (canvas_w - 50, cur_y + 35)], fill=(51, 51, 51))
         draw.rectangle([(50, cur_y), (53, cur_y + 35)], fill=self.COLOR_ACCENT)
         draw.text(

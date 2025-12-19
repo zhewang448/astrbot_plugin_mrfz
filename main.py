@@ -15,7 +15,7 @@ from .data_source import VoiceManager
 from .renderer import VoiceRenderer
 
 
-@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "3.4.3")
+@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "3.4.0")
 class MyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -192,26 +192,46 @@ class MyPlugin(Star):
         """/mrfz [角色] [语音名] [语言]"""
         self.voice_mgr.scan_voice_files()
 
-        # 1. 角色处理
+        # 1. 角色处理：如果没输入角色，随机选一个
         if not character:
             if not self.voice_mgr.voice_index:
                 yield event.plain_result("本地暂无语音，请先使用 /mrfz_fetch 下载")
                 return
             character = random.choice(list(self.voice_mgr.voice_index.keys()))
 
-        # 2. 自动下载检查
+        # ==================== 模糊匹配逻辑 ====================
+        # 2. 检查角色是否存在
         if character not in self.voice_mgr.voice_index:
-            if self.auto_download:
-                yield event.plain_result(f"未找到 {character}，正在尝试从 PRTS 获取...")
-                success, msg = await self.voice_mgr.fetch_character_voices(
-                    character, self.auto_download_skin, self.download_langs
+            # 2.1 先尝试模糊匹配 (从本地已有的角色里找)
+            all_names = list(self.voice_mgr.voice_index.keys())
+            # n=1 表示只找最像的一个，cutoff=0.6 表示相似度至少要 60%
+            matches = difflib.get_close_matches(character, all_names, n=1, cutoff=0.6)
+
+            guessed_char = None
+            if matches:
+                guessed_char = matches[0]
+                yield event.plain_result(
+                    f"本地未找到「{character}」，猜测您是指「{guessed_char}」...已自动切换。"
                 )
-                if not success:
-                    yield event.plain_result(f"获取失败: {msg}")
+                # 修正角色名为匹配到的名字
+                character = guessed_char
+
+            # 2.2 如果模糊匹配也没找到，再尝试自动下载
+            if not guessed_char:
+                if self.auto_download:
+                    yield event.plain_result(
+                        f"未找到 {character}，正在尝试从 PRTS 获取..."
+                    )
+                    success, msg = await self.voice_mgr.fetch_character_voices(
+                        character, self.auto_download_skin, self.download_langs
+                    )
+                    if not success:
+                        yield event.plain_result(f"获取失败: {msg}")
+                        return
+                else:
+                    yield event.plain_result(f"未找到角色 {character} (自动下载已关闭)")
                     return
-            else:
-                yield event.plain_result(f"未找到角色 {character} (自动下载已关闭)")
-                return
+        # ==================== 逻辑结束 ====================
 
         # 3. 语言处理
         target_lang = None
@@ -237,6 +257,7 @@ class MyPlugin(Star):
         path = self.voice_mgr.get_voice_path(character, voice, target_lang)
         if path:
             yield event.plain_result(f"播放 {character}: {voice}")
+            # --- 之前这里被截断了，请确保下面这一行是完整的 ---
             yield event.chain_result([Record.fromFileSystem(str(path))])
         else:
             yield event.plain_result(f"文件未找到: {voice}")
@@ -265,7 +286,7 @@ class MyPlugin(Star):
             logger.error(f"渲染错误: {e}", exc_info=True)
             yield event.plain_result(f"终端渲染模块故障: {e}")
 
-    @filter.command("mrfz_bind")
+    @filter.command("mrfz_bind", alias={"绑定语音", "语音绑定"})
     async def mrfz_bind(
         self,
         event: AstrMessageEvent,
@@ -294,7 +315,7 @@ class MyPlugin(Star):
 
         yield event.plain_result(f"绑定成功: 「{trigger}」 -> {character} {voice}")
 
-    @filter.command("mrfz_unbind")
+    @filter.command("mrfz_unbind", alias={"解绑语音", "语音解绑"})
     async def mrfz_unbind(self, event: AstrMessageEvent, trigger: str):
         if trigger in self.custom_mappings:
             del self.custom_mappings[trigger]
@@ -306,7 +327,7 @@ class MyPlugin(Star):
         else:
             yield event.plain_result("未找到该触发词")
 
-    @filter.command("mrfz_fetch")
+    @filter.command("mrfz_fetch", alias={"下载语音", "获取语音"})
     async def mrfz_fetch(self, event: AstrMessageEvent, character: str):
         yield event.plain_result(f"开始获取 {character}...")
         success, msg = await self.voice_mgr.fetch_character_voices(
@@ -314,7 +335,7 @@ class MyPlugin(Star):
         )
         yield event.plain_result(msg)
 
-    @filter.command("mrfz_help")
+    @filter.command("mrfz_help", alias={"明日方舟语音帮助"})
     async def mrfz_help(self, event: AstrMessageEvent):
         """显示明日方舟语音插件帮助"""
         try:
