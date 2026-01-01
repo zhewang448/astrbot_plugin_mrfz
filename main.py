@@ -14,7 +14,7 @@ from .data_source import VoiceManager
 from .renderer import VoiceRenderer
 
 
-@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "3.4.0")
+@register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "3.4.1")
 class MyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
