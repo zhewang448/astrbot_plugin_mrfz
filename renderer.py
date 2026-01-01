@@ -1,16 +1,9 @@
 import math
 from pathlib import Path
 from typing import List, Dict
+from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
 from astrbot.api import logger
-
-# 尝试导入 jinja2 (可选)
-try:
-    from jinja2 import Template
-
-    HAS_JINJA2 = True
-except ImportError:
-    HAS_JINJA2 = False
 
 
 class VoiceRenderer:
@@ -25,23 +18,34 @@ class VoiceRenderer:
     COLOR_BORDER = (68, 68, 68)
 
     def __init__(self, font_path: str = None):
-        self.font_path = font_path
+        self.font_path = Path(font_path) if font_path else None  # 确保转换为Path对象
         self.plugin_dir = Path(__file__).parent
         self._font_cache = {}  # 字体缓存
 
     def _load_font(self, size: int):
+        """
+        从内存加载字体，避免 Windows 下文件占用锁死
+        """
         if size in self._font_cache:
             return self._font_cache[size]
-
         font = None
-        if self.font_path and Path(self.font_path).exists():
-            font = ImageFont.truetype(self.font_path, size)
-        else:
+
+        # 1. 尝试加载指定字体
+        if self.font_path and self.font_path.exists():
+            try:
+                with open(self.font_path, "rb") as f:
+                    font_bytes = BytesIO(f.read())
+
+                # 让 PIL 从内存流中加载字体
+                font = ImageFont.truetype(font_bytes, size)
+            except Exception as e:
+                logger.warning(f"加载插件字体失败，尝试系统字体: {e}")
+                font = None
+        if font is None:
             try:
                 font = ImageFont.truetype("msyh.ttc", size)
             except:
                 font = ImageFont.load_default()
-
         self._font_cache[size] = font
         return font
 
