@@ -56,7 +56,6 @@ class VoiceRenderer:
         """渲染帮助图片 (Dark Mode)"""
         return await self._render_help_logic()
 
-    # 将 help 逻辑抽离以便复用，实际代码中你可以直接把上一版的 render_help 贴这就行
     async def _render_help_logic(self):
         width, height = 900, 680
         image = Image.new("RGB", (width, height), self.COLOR_BG)
