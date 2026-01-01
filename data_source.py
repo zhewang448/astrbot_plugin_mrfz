@@ -1,8 +1,5 @@
-import os
 import json
-import asyncio
 import re
-import random
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any, Union
 import aiohttp
@@ -58,7 +55,7 @@ class VoiceManager:
         "周年庆典",
     ]
 
-    # 语言映射配置 - 颜色已调深，以便白色文字显示清晰
+    # 语言映射配置
     LANGUAGE_MAP = {
         "cn": {"name": "中文", "rank": "2", "color": (46, 125, 50)},
         "jp": {"name": "日语", "rank": "3", "color": (21, 101, 192)},
@@ -72,29 +69,40 @@ class VoiceManager:
     LANG_ALIAS = {
         "中文": "cn",
         "普通话": "cn",
+        "中": "cn",
+        "汉语": "cn",
         "cn": "cn",
         "2": "cn",
+        "日文": "jp",
         "日语": "jp",
+        "日": "jp",
         "jp": "jp",
         "3": "jp",
+        "英文": "us",
         "英语": "us",
+        "英": "us",
         "us": "us",
         "4": "us",
+        "韩文": "kr",
         "韩语": "kr",
+        "韩": "kr",
         "kr": "kr",
         "5": "kr",
         "方言": "fy",
+        "方": "fy",
         "fy": "fy",
         "1": "fy",
+        "意文": "it",
         "意语": "it",
         "意大利语": "it",
+        "意": "it",
         "it": "it",
         "6": "it",
     }
 
     def __init__(self, data_dir: Path, plugin_dir: Union[str, Path]):
         self.data_dir = data_dir
-        # 强制转换为 Path 对象，防止路径拼接报错
+        # 转换为 Path 对象
         self.plugin_dir = Path(plugin_dir)
         self.voices_dir = data_dir / "voices"
         self.assets_dir = data_dir / "assets"
@@ -151,8 +159,8 @@ class VoiceManager:
         self, character: str, voice_name: str, language: str
     ) -> Optional[Path]:
         """获取具体的语音文件路径"""
-        real_char = character.replace("皮肤", "")
-        base_path = self.voices_dir / real_char
+        base_char = character.replace("皮肤", "")
+        base_path = self.voices_dir / base_char
 
         if character.endswith("皮肤"):
             target = base_path / "skin" / language / f"{voice_name}.wav"
@@ -232,36 +240,45 @@ class VoiceManager:
                 desc_idx = 0
 
                 logger.info(f"正在下载 {current_char_name} 的 {target_lang} 语音...")
+                async with aiohttp.ClientSession(
+                    headers=self.DEFAULT_HEADERS
+                ) as session:
+                    # 尝试下载直到连续失败或达到上限
+                    while desc_idx < len(self.VOICE_DESCRIPTIONS) and file_idx <= 50:
+                        desc = self.VOICE_DESCRIPTIONS[desc_idx]
+                        fname = f"cn_{file_idx:03d}.wav"
+                        voice_url = f"{base_url}/{key}/{fname}"
 
-                # 尝试下载直到连续失败或达到上限
-                while desc_idx < len(self.VOICE_DESCRIPTIONS) and file_idx <= 50:
-                    desc = self.VOICE_DESCRIPTIONS[desc_idx]
-                    fname = f"cn_{file_idx:03d}.wav"
-                    voice_url = f"{base_url}/{key}/{fname}"
+                        if await self._download_single_voice(
+                            session, current_char_name, voice_url, target_lang, desc
+                        ):
+                            total_success += 1
+                            desc_idx += 1
+                        else:
+                            pass
 
-                    if await self._download_single_voice(
-                        current_char_name, voice_url, target_lang, desc
-                    ):
-                        total_success += 1
-                        desc_idx += 1
-                    else:
-                        pass
-
-                    file_idx += 1
-
+                        file_idx += 1
+                # 语音下载完成，获取头像
+            await self.fetch_character_image(base_char)
+            # 更新索引
             self.scan_voice_files()
             return True, f"下载完成，共新增 {total_success} 条语音"
 
         except Exception as e:
-            logger.error(f"下载语音异常: {e}")
+            logger.error(f"下载语音或头像异常: {e}")
             return False, str(e)
 
     async def _download_single_voice(
-        self, character: str, url: str, lang: str, filename: str
+        self,
+        session: aiohttp.ClientSession,
+        character: str,
+        url: str,
+        lang: str,
+        filename: str,
     ) -> bool:
         """下载单个文件 helper"""
-        real_char = character.replace("皮肤", "")
-        base_dir = self.voices_dir / real_char
+        base_char = character.replace("皮肤", "")
+        base_dir = self.voices_dir / base_char
         if character.endswith("皮肤"):
             save_dir = base_dir / "skin" / lang
         else:
@@ -275,13 +292,12 @@ class VoiceManager:
             return True
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=self.DEFAULT_HEADERS) as resp:
-                    if resp.status == 200:
-                        data = await resp.read()
-                        with open(path, "wb") as f:
-                            f.write(data)
-                        return True
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    with open(path, "wb") as f:
+                        f.write(data)
+                    return True
         except:
             return False
         return False
@@ -289,8 +305,8 @@ class VoiceManager:
     async def _get_character_id_map(self, character: str) -> Optional[Dict]:
         """爬取 PRTS Wiki 获取语音 Key 映射"""
         try:
-            real_char = character.replace("皮肤", "")
-            url = f"https://prts.wiki/w/{real_char}/语音记录"
+            base_char = character.replace("皮肤", "")
+            url = f"https://prts.wiki/w/{base_char}/语音记录"
 
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=self.DEFAULT_HEADERS) as resp:
@@ -322,45 +338,53 @@ class VoiceManager:
             # 1. 找出缺头像的角色
             missing_chars = []
             for char in self.voice_index.keys():
-                real_char = char.replace("皮肤", "")
-                if not (self.assets_dir / f"{real_char}.png").exists():
-                    missing_chars.append(real_char)
+                base_char = char.replace("皮肤", "")
+                if not (self.assets_dir / f"{base_char}.png").exists():
+                    missing_chars.append(base_char)
 
             if not missing_chars:
                 return
 
             # 2. 逐个获取
             for char in set(missing_chars):
-                url = f"https://prts.wiki/w/文件:头像_{char}.png"
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url) as resp:
-                        if resp.status == 200:
-                            html = await resp.text()
-                            # 正则获取 og:image 的内容
-                            match = re.search(
-                                r'<meta property="og:image" content="([^"]+)"', html
-                            )
-                            if match:
-                                img_url = match.group(1)
-                                # 处理 URL 格式 (PRTS wiki 有时返回相对路径或无协议路径)
-                                if img_url.startswith("//"):
-                                    img_url = "https:" + img_url
-                                elif not img_url.startswith("http"):
-                                    img_url = "https://prts.wiki" + img_url
-
-                                # 下载图片
-                                try:
-                                    async with session.get(img_url) as img_resp:
-                                        if img_resp.status == 200:
-                                            img_data = await img_resp.read()
-                                            with open(
-                                                self.assets_dir / f"{real_char}.png",
-                                                "wb",
-                                            ) as f:
-                                                f.write(img_data)
-                                            # logger.info(f"已缓存头像: {real_char}")
-                                except Exception as e:
-                                    logger.warning(f"头像下载失败 {real_char}: {e}")
+                await self.fetch_character_image(char)
 
         except Exception as e:
             logger.warning(f"资源检查过程出现异常: {e}")
+
+    async def fetch_character_image(self, base_char: str) -> Tuple[bool, str]:
+        """获取角色头像"""
+        if not base_char:
+            return False
+        url = f"https://prts.wiki/w/文件:头像_{base_char}.png"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    # 正则获取 og:image 的内容
+                    match = re.search(
+                        r'<meta property="og:image" content="([^"]+)"', html
+                    )
+                    if match:
+                        img_url = match.group(1)
+                        # 处理 URL 格式 (PRTS wiki 有时返回相对路径或无协议路径)
+                        if img_url.startswith("//"):
+                            img_url = "https:" + img_url
+                        elif not img_url.startswith("http"):
+                            img_url = "https://prts.wiki" + img_url
+
+                        # 下载图片
+                        try:
+                            async with session.get(img_url) as img_resp:
+                                if img_resp.status == 200:
+                                    img_data = await img_resp.read()
+                                    with open(
+                                        self.assets_dir / f"{base_char}.png",
+                                        "wb",
+                                    ) as f:
+                                        f.write(img_data)
+                                        logger.info(f"下载{base_char} 头像成功")
+                                    return True
+
+                        except Exception as e:
+                            logger.warning(f"头像下载失败 {base_char}: {e}")
