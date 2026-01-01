@@ -24,9 +24,6 @@ class VoiceRenderer:
     COLOR_TEXT_SUB = (200, 200, 200)
     COLOR_BORDER = (68, 68, 68)
 
-    # HTML 模板保持不变，用于生成本地网页记录
-    HTML_TEMPLATE = r"""...（此处保持你之前的HTML模板，为节省篇幅省略）..."""
-
     def __init__(self, font_path: str = None):
         self.font_path = font_path
         self.plugin_dir = Path(__file__).parent
@@ -311,20 +308,6 @@ class VoiceRenderer:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         image.save(out_path)
         return str(out_path.absolute())
-
-    def render_html(self, data: Dict):
-        """生成 HTML 报表"""
-        if not HAS_JINJA2:
-            return
-        try:
-            template = Template(self.HTML_TEMPLATE)
-            html_content = template.render(**data)
-            path = Path(self.plugin_dir / "list.html")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(html_content)
-        except Exception as e:
-            logger.error(f"HTML 生成失败: {e}")
 
     async def render_voice_menu(
         self,

@@ -38,7 +38,6 @@ class MyPlugin(Star):
         self.auto_download_skin = self.config.get("auto_download_skin", True)
         self.download_langs = self.config.get("auto_download_language", "123")
         self.default_lang_rank = self.config.get("default_language_rank", "123456")
-        self.html_render_mode = self.config.get("html_render_mode", False)
 
         # 4. 加载自定义指令 (从 JSON 文件)
         self.custom_mappings = self._load_custom_commands()
@@ -266,8 +265,6 @@ class MyPlugin(Star):
                     render_data, self.voice_mgr.VOICE_DESCRIPTIONS
                 ),
             )
-            if self.html_render_mode:
-                self.renderer.render_html(render_data)
             yield event.image_result(str(img_path))
         except Exception as e:
             logger.error(f"渲染错误: {e}", exc_info=True)
