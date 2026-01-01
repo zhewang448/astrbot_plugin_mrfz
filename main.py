@@ -69,7 +69,7 @@ class MyPlugin(Star):
         except Exception as e:
             logger.error(f"保存自定义指令失败: {e}")
 
-    def _get_list_render_data(self) -> dict:
+    async def _get_list_render_data(self) -> dict:
         """[新增] 辅助方法：构建列表渲染所需的数据字典"""
         # 扫描最新文件
         self.voice_mgr.scan_voice_files()
@@ -85,11 +85,29 @@ class MyPlugin(Star):
         # 填充自定义指令
         for trigger, info in self.custom_mappings.items():
             base = info["character"].replace("皮肤", "")
+            # === 核心修改 ===
+            lang_code = info.get("lang")
+            lang_display = "Auto"
+            if lang_code:
+                # 指定了语言
+                lang_conf = self.voice_mgr.LANGUAGE_MAP.get(lang_code)
+                lang_display = lang_conf["name"] if lang_conf else lang_code
+            else:
+                auto_code = await self.voice_mgr.choose_language(
+                    info["character"], self.default_lang_rank
+                )
+                if auto_code == "nodownload":
+                    lang_display = "Auto(无)"
+                else:
+                    name = self.voice_mgr.LANGUAGE_MAP.get(auto_code, {}).get(
+                        "name", auto_code
+                    )
+                    lang_display = f"Auto({name})"
             render_data["custom_commands"].append(
                 {
                     "trigger": trigger,
                     "target": f"{info['character']} · {info['voice']}",
-                    "lang": info.get("lang", "Auto"),
+                    "lang_display": lang_display,
                     "avatar_path": str(self.voice_mgr.assets_dir / f"{base}.png"),
                 }
             )
@@ -234,7 +252,7 @@ class MyPlugin(Star):
         yield event.plain_result("正在读取 PRTS 终端数据...")
 
         # 使用辅助方法获取数据
-        render_data = self._get_list_render_data()
+        render_data = await self._get_list_render_data()
 
         # 渲染
         try:
@@ -302,7 +320,7 @@ class MyPlugin(Star):
     @filter.command("mrfz_fetch", alias={"下载语音", "获取语音"})
     async def mrfz_fetch(self, event: AstrMessageEvent, character: str):
         """从 PRTS 获取角色语音"""
-        yield event.plain_result(f"开始获取 {character}...")
+        yield event.plain_result(f"开始获取 {character}的语音文件...")
         success, msg = await self.voice_mgr.fetch_character_voices(
             character, True, "123456"
         )
@@ -316,7 +334,7 @@ class MyPlugin(Star):
             help_img_path = await self.renderer.render_help()
 
             # 2. 生成列表图片
-            render_data = self._get_list_render_data()
+            render_data = await self._get_list_render_data()
             list_img_path = self.renderer.render_image(
                 render_data, self.voice_mgr.VOICE_DESCRIPTIONS
             )
@@ -337,7 +355,7 @@ class MyPlugin(Star):
         """显示明日方舟语音插件帮助"""
         try:
             # 获取数据
-            render_data = self._get_list_render_data()
+            render_data = await self._get_list_render_data()
             loop = asyncio.get_running_loop()
 
             help_img_path = await self.renderer.render_help()
