@@ -2,7 +2,9 @@ import json
 import random
 import asyncio
 import difflib
+import time
 from pathlib import Path
+from typing import Optional, Dict
 from astrbot.api.all import *
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.core.config.astrbot_config import AstrBotConfig
@@ -12,6 +14,10 @@ from astrbot.api import logger
 # 引入拆分后的模块
 from .data_source import VoiceManager
 from .renderer import VoiceRenderer
+
+# 常量定义
+FUZZY_MATCH_THRESHOLD = 0.6  # 模糊匹配相似度阈值
+SCAN_CACHE_DURATION = 60  # 文件扫描缓存时间(秒)
 
 
 @register("astrbot_plugin_mrfz", "bushikq", "明日方舟角色语音插件", "3.4.1")
@@ -42,36 +48,75 @@ class MyPlugin(Star):
         # 4. 加载自定义指令 (从 JSON 文件)
         self.custom_mappings = self._load_custom_commands()
 
-        # 5. 启动后台资源检查
+        # 5. 文件扫描缓存
+        self._last_scan_time = 0  # 上次扫描时间戳
+
+        # 6. 启动后台资源检查
         asyncio.create_task(self.voice_mgr.ensure_assets())
 
     # ================== 持久化存储逻辑 ==================
 
-    def _load_custom_commands(self) -> dict:
-        """从 JSON 加载自定义指令"""
-        if self.custom_cmd_file.exists():
-            try:
-                with open(self.custom_cmd_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"加载自定义指令失败: {e}")
-                return {}
-        return {}
+    def _load_custom_commands(self) -> Dict[str, dict]:
+        """从 JSON 加载自定义指令
 
-    def _save_custom_commands(self):
-        """保存自定义指令到 JSON"""
+        Returns:
+            Dict[str, dict]: 自定义指令映射字典，格式为 {触发词: {character, voice, lang}}
+        """
+        if not self.custom_cmd_file.exists():
+            return {}
+
+        try:
+            with open(self.custom_cmd_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if not isinstance(data, dict):
+                    logger.warning(f"自定义指令文件格式错误，应为字典类型")
+                    return {}
+                return data
+        except json.JSONDecodeError as e:
+            logger.error(f"自定义指令 JSON 解析失败: {e}，文件可能已损坏")
+            return {}
+        except PermissionError:
+            logger.error(f"无权限读取自定义指令文件: {self.custom_cmd_file}")
+            return {}
+        except Exception as e:
+            logger.error(f"加载自定义指令时发生未知错误: {e}", exc_info=True)
+            return {}
+
+    def _save_custom_commands(self) -> bool:
+        """保存自定义指令到 JSON
+
+        Returns:
+            bool: 保存是否成功
+        """
         try:
             # 确保目录存在
             self.custom_cmd_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self.custom_cmd_file, "w", encoding="utf-8") as f:
                 json.dump(self.custom_mappings, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            logger.error(f"保存自定义指令失败: {e}")
+            logger.error(f"保存自定义指令时发生未知错误: {e}", exc_info=True)
+            return False
+
+    def _scan_if_needed(self, force: bool = False) -> None:
+        """智能扫描：仅在缓存过期或强制时才扫描
+
+        Args:
+            force: 是否强制扫描，忽略缓存
+        """
+        current_time = time.time()
+        if force or (current_time - self._last_scan_time) > SCAN_CACHE_DURATION:
+            self.voice_mgr.scan_voice_files()
+            self._last_scan_time = current_time
+            logger.debug(f"执行文件扫描，下次扫描时间: {SCAN_CACHE_DURATION}秒后")
 
     async def _get_list_render_data(self) -> dict:
-        """[新增] 辅助方法：构建列表渲染所需的数据字典"""
-        # 扫描最新文件
-        self.voice_mgr.scan_voice_files()
+        """构建列表渲染所需的数据字典
+
+        Returns:
+            dict: 包含 custom_commands, operators, skin_operators, voice_types 的字典
+        """
+        # 使用智能扫描
+        self._scan_if_needed()
 
         # 组装数据供 Renderer 使用
         render_data = {
@@ -142,8 +187,12 @@ class MyPlugin(Star):
     # ================== 事件监听 ==================
 
     @filter.event_message_type(filter.EventMessageType.ALL)
-    async def on_message(self, event: AstrMessageEvent):
-        """监听自定义触发词"""
+    async def on_message(self, event: AstrMessageEvent) -> None:
+        """监听所有消息，检测并响应自定义触发词
+
+        Args:
+            event: 消息事件对象
+        """
         msg = event.message_str.strip()
         if msg in self.custom_mappings:
             cfg = self.custom_mappings[msg]
@@ -169,12 +218,25 @@ class MyPlugin(Star):
     async def mrfz_handler(
         self,
         event: AstrMessageEvent,
-        character: str = None,
-        voice: str = None,
-        lang: str = None,
+        character: Optional[str] = None,
+        voice: Optional[str] = None,
+        lang: Optional[str] = None,
     ):
-        """/mrfz [角色] [语音名] [语言]"""
-        self.voice_mgr.scan_voice_files()
+        """播放明日方舟角色语音
+
+        Args:
+            event: 消息事件对象
+            character: 角色名称，支持模糊匹配，不填则随机
+            voice: 语音类型(如"问候"、"交谈1")，不填则随机
+            lang: 语言代码(中文/日语/英语等)，不填则按优先级自动选择
+
+        Examples:
+            /mrfz 凯尔希 问候 中文
+            /mrfz 阿米娅
+            /mrfz
+        """
+        # 使用智能扫描
+        self._scan_if_needed()
 
         # 1. 角色处理：如果没输入角色，随机选一个
         if not character:
@@ -188,8 +250,10 @@ class MyPlugin(Star):
         if character not in self.voice_mgr.voice_index:
             # 先尝试从本地已有的角色模糊匹配
             all_names = list(self.voice_mgr.voice_index.keys())
-            # n=1 表示只找最像的一个，cutoff=0.6 表示相似度至少要 60%
-            matches = difflib.get_close_matches(character, all_names, n=1, cutoff=0.6)
+            # n=1 表示只找最像的一个
+            matches = difflib.get_close_matches(
+                character, all_names, n=1, cutoff=FUZZY_MATCH_THRESHOLD
+            )
 
             guessed_char = None
             if matches:
@@ -247,7 +311,13 @@ class MyPlugin(Star):
 
     @filter.command("mrfz_list", alias={"明日方舟语音列表"})
     async def mrfz_list_handler(self, event: AstrMessageEvent):
-        """生成样式化的语音列表"""
+        """生成并发送语音列表图片
+
+        显示所有已下载的干员、皮肤、自定义指令等信息
+
+        Args:
+            event: 消息事件对象
+        """
         yield event.plain_result("正在读取 PRTS 终端数据...")
 
         # 使用辅助方法获取数据
@@ -277,9 +347,21 @@ class MyPlugin(Star):
         trigger: str,
         character: str,
         voice: str,
-        lang: str = None,
+        lang: Optional[str] = None,
     ):
-        """绑定自定义语音"""
+        """将语音绑定到自定义触发词
+
+        Args:
+            event: 消息事件对象
+            trigger: 触发词(如"早安")
+            character: 角色名称
+            voice: 语音类型
+            lang: 语言代码(可选)
+
+        Examples:
+            /mrfz_bind 早安 阿米娅 问候 中文
+            /mrfz_bind 晚安 凯尔希 交谈1
+        """
         lang_code = None
         if lang:
             lang_code = self.voice_mgr.LANG_ALIAS.get(lang)
@@ -303,7 +385,15 @@ class MyPlugin(Star):
 
     @filter.command("mrfz_unbind", alias={"解绑语音", "语音解绑"})
     async def mrfz_unbind(self, event: AstrMessageEvent, trigger: str):
-        """解绑自定义语音"""
+        """解除自定义触发词绑定
+
+        Args:
+            event: 消息事件对象
+            trigger: 要解绑的触发词
+
+        Examples:
+            /mrfz_unbind 早安
+        """
         if trigger in self.custom_mappings:
             del self.custom_mappings[trigger]
 
@@ -316,45 +406,40 @@ class MyPlugin(Star):
 
     @filter.command("mrfz_fetch", alias={"下载语音", "获取语音"})
     async def mrfz_fetch(self, event: AstrMessageEvent, character: str):
-        """从 PRTS 获取角色语音"""
-        yield event.plain_result(f"开始获取 {character}的语音文件...")
+        """从 PRTS Wiki 下载指定角色的语音文件
+
+        Args:
+            event: 消息事件对象
+            character: 角色名称
+
+        Examples:
+            /mrfz_fetch 凯尔希
+            /mrfz_fetch 陈
+        """
+        yield event.plain_result(f"开始获取 {character} 的语音文件...")
         success, msg = await self.voice_mgr.fetch_character_voices(
             character, True, "123456"
         )
+        # 下载完成后强制刷新缓存
+        if success:
+            self._scan_if_needed(force=True)
         yield event.plain_result(msg)
 
     @filter.command("mrfz_help", alias={"明日方舟语音帮助"})
     async def mrfz_help(self, event: AstrMessageEvent):
-        """显示明日方舟语音插件帮助"""
-        try:
-            # 1. 生成帮助图片
-            help_img_path = await self.renderer.render_help()
+        """显示插件帮助信息和语音列表
 
-            # 2. 生成列表图片
-            render_data = await self._get_list_render_data()
-            list_img_path = self.renderer.render_image(
-                render_data, self.voice_mgr.VOICE_DESCRIPTIONS
-            )
+        生成帮助图片和干员列表图片并发送
 
-            # 3. 构造消息链发送两张图片
-            chain = [
-                Plain("已生成帮助文档与索引列表：\n"),
-                Image.fromFileSystem(help_img_path),
-                Image.fromFileSystem(list_img_path),
-            ]
-            yield event.chain_result(chain)
-        except Exception as e:
-            logger.error(f"帮助图片生成失败: {e}", exc_info=True)
-            yield event.plain_result(f"帮助生成失败: {e}")
-
-    @filter.command("mrfz_help", alias={"明日方舟语音帮助"})
-    async def mrfz_help(self, event: AstrMessageEvent):
-        """显示明日方舟语音插件帮助"""
+        Args:
+            event: 消息事件对象
+        """
         try:
             # 获取数据
             render_data = await self._get_list_render_data()
             loop = asyncio.get_running_loop()
 
+            # 异步渲染图片，避免阻塞
             help_img_path = await self.renderer.render_help()
             list_img_path = await loop.run_in_executor(
                 None,
@@ -362,6 +447,7 @@ class MyPlugin(Star):
                     render_data, self.voice_mgr.VOICE_DESCRIPTIONS
                 ),
             )
+
             # 构造消息链发送两张图片
             chain = [
                 Plain("已生成帮助文档与索引列表：\n"),
@@ -369,6 +455,12 @@ class MyPlugin(Star):
                 Image.fromFileSystem(list_img_path),
             ]
             yield event.chain_result(chain)
+        except FileNotFoundError as e:
+            logger.error(f"帮助图片文件未找到: {e}")
+            yield event.plain_result(f"帮助生成失败: 图片文件未找到")
+        except PermissionError as e:
+            logger.error(f"无权限访问图片文件: {e}")
+            yield event.plain_result(f"帮助生成失败: 权限不足")
         except Exception as e:
             logger.error(f"帮助图片生成失败: {e}", exc_info=True)
             yield event.plain_result(f"帮助生成失败: {e}")
