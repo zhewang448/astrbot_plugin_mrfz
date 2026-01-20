@@ -240,24 +240,33 @@ class VoiceManager:
                 desc_idx = 0
 
                 logger.info(f"正在下载 {current_char_name} 的 {target_lang} 语音...")
-                async with aiohttp.ClientSession(
-                    headers=self.DEFAULT_HEADERS
-                ) as session:
-                    # 尝试下载直到连续失败或达到上限
-                    while desc_idx < len(self.VOICE_DESCRIPTIONS) and file_idx <= 50:
-                        desc = self.VOICE_DESCRIPTIONS[desc_idx]
-                        fname = f"cn_{file_idx:03d}.wav"
-                        voice_url = f"{base_url}/{key}/{fname}"
-
-                        if await self._download_single_voice(
-                            session, current_char_name, voice_url, target_lang, desc
+                try:
+                    async with aiohttp.ClientSession(
+                        headers=self.DEFAULT_HEADERS,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as session:
+                        # 尝试下载直到连续失败或达到上限
+                        while (
+                            desc_idx < len(self.VOICE_DESCRIPTIONS) and file_idx <= 50
                         ):
-                            total_success += 1
-                            desc_idx += 1
-                        else:
-                            pass
+                            desc = self.VOICE_DESCRIPTIONS[desc_idx]
+                            fname = f"cn_{file_idx:03d}.wav"
+                            voice_url = f"{base_url}/{key}/{fname}"
 
-                        file_idx += 1
+                            success, msg = await self._download_single_voice(
+                                session, current_char_name, voice_url, target_lang, desc
+                            )
+                            if success:
+                                total_success += 1
+                                desc_idx += 1
+                            else:
+                                pass
+
+                            file_idx += 1
+                except aiohttp.ClientError as e:
+                    logger.warning(f"网络请求错误 (下载 {current_char_name}): {e}")
+                except TimeoutError:
+                    logger.warning(f"下载超时 (下载 {current_char_name})")
                 # 语音下载完成，获取头像
             await self.fetch_character_image(base_char)
             # 更新索引
@@ -275,8 +284,19 @@ class VoiceManager:
         url: str,
         lang: str,
         filename: str,
-    ) -> bool:
-        """下载单个文件 helper"""
+    ) -> Tuple[bool, str]:
+        """下载单个语音文件
+
+        Args:
+            session: aiohttp 会话
+            character: 角色名称
+            url: 下载 URL
+            lang: 语言代码
+            filename: 文件名
+
+        Returns:
+            Tuple[bool, str]: (是否成功, 消息)
+        """
         base_char = character.replace("皮肤", "")
         base_dir = self.voices_dir / base_char
         if character.endswith("皮肤"):
@@ -284,23 +304,42 @@ class VoiceManager:
         else:
             save_dir = base_dir / lang
 
-        save_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            save_dir.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            return False, f"无权限创建目录: {save_dir}"
+        except OSError as e:
+            return False, f"创建目录失败: {e}"
+
         safe_name = re.sub(r'[\\/:*?"<>|]', "_", filename)
         path = save_dir / f"{safe_name}.wav"
 
         if path.exists():
-            return True
+            return True, f"文件已存在"
 
         try:
             async with session.get(url) as resp:
                 if resp.status == 200:
                     data = await resp.read()
-                    with open(path, "wb") as f:
-                        f.write(data)
-                    return True
-        except:
-            return False
-        return False
+                    try:
+                        with open(path, "wb") as f:
+                            f.write(data)
+                        return True, f"下载成功"
+                    except PermissionError:
+                        return False, f"无权限写入文件: {path}"
+                    except OSError as e:
+                        return False, f"写入文件失败: {e}"
+                elif resp.status == 404:
+                    return False, "文件不存在(404)"
+                else:
+                    return False, f"HTTP错误: {resp.status}"
+        except aiohttp.ClientError as e:
+            return False, f"网络请求失败: {e}"
+        except TimeoutError:
+            return False, "下载超时"
+        except Exception as e:
+            logger.error(f"下载语音时发生未知错误: {e}")
+            return False, f"未知错误: {e}"
 
     async def _get_character_id_map(self, character: str) -> Optional[Dict]:
         """爬取 PRTS Wiki 获取语音 Key 映射"""
@@ -308,7 +347,9 @@ class VoiceManager:
             base_char = character.replace("皮肤", "")
             url = f"https://prts.wiki/w/{base_char}/语音记录"
 
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as session:
                 async with session.get(url, headers=self.DEFAULT_HEADERS) as resp:
                     if resp.status != 200:
                         return None
@@ -328,6 +369,12 @@ class VoiceManager:
                 result[lang.strip()] = path.strip()
 
             return result
+        except aiohttp.ClientError as e:
+            logger.error(f"网络请求失败: {e}")
+            return None
+        except TimeoutError:
+            logger.error(f"获取角色ID映射超时: {character}")
+            return None
         except Exception as e:
             logger.error(f"解析Wiki失败: {e}")
             return None
@@ -347,44 +394,79 @@ class VoiceManager:
 
             # 2. 逐个获取
             for char in set(missing_chars):
-                await self.fetch_character_image(char)
+                success, msg = await self.fetch_character_image(char)
+                if not success:
+                    logger.debug(f"获取头像跳过 {char}: {msg}")
 
         except Exception as e:
             logger.warning(f"资源检查过程出现异常: {e}")
 
     async def fetch_character_image(self, base_char: str) -> Tuple[bool, str]:
-        """获取角色头像"""
+        """获取角色头像
+
+        Args:
+            base_char: 角色基础名称
+
+        Returns:
+            Tuple[bool, str]: (是否成功, 消息)
+        """
         if not base_char:
-            return False
-        url = f"https://prts.wiki/w/文件:头像_{base_char}.png"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                if resp.status == 200:
+            return False, "角色名称为空"
+
+        try:
+            url = f"https://prts.wiki/w/文件:头像_{base_char}.png"
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as session:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        return False, f"获取头像页面失败: HTTP {resp.status}"
                     html = await resp.text()
-                    # 正则获取 og:image 的内容
-                    match = re.search(
-                        r'<meta property="og:image" content="([^"]+)"', html
-                    )
-                    if match:
-                        img_url = match.group(1)
-                        # 处理 URL 格式 (PRTS wiki 有时返回相对路径或无协议路径)
-                        if img_url.startswith("//"):
-                            img_url = "https:" + img_url
-                        elif not img_url.startswith("http"):
-                            img_url = "https://prts.wiki" + img_url
 
-                        # 下载图片
+            # 正则获取 og:image 的内容
+            match = re.search(r'<meta property="og:image" content="([^"]+)"', html)
+            if not match:
+                return False, "未找到头像图片链接"
+
+            img_url = match.group(1)
+            # 处理 URL 格式 (PRTS wiki 有时返回相对路径或无协议路径)
+            if img_url.startswith("//"):
+                img_url = "https:" + img_url
+            elif not img_url.startswith("http"):
+                img_url = "https://prts.wiki" + img_url
+
+            # 下载图片
+            try:
+                async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as session:
+                    async with session.get(img_url) as img_resp:
+                        if img_resp.status != 200:
+                            return False, f"下载头像失败: HTTP {img_resp.status}"
+                        img_data = await img_resp.read()
+                        save_path = self.assets_dir / f"{base_char}.png"
                         try:
-                            async with session.get(img_url) as img_resp:
-                                if img_resp.status == 200:
-                                    img_data = await img_resp.read()
-                                    with open(
-                                        self.assets_dir / f"{base_char}.png",
-                                        "wb",
-                                    ) as f:
-                                        f.write(img_data)
-                                        logger.info(f"下载{base_char} 头像成功")
-                                    return True
+                            with open(save_path, "wb") as f:
+                                f.write(img_data)
+                            logger.info(f"下载 {base_char} 头像成功")
+                            return True, "下载成功"
+                        except PermissionError:
+                            return False, f"无权限写入头像: {save_path}"
+                        except OSError as e:
+                            return False, f"写入头像失败: {e}"
 
-                        except Exception as e:
-                            logger.warning(f"头像下载失败 {base_char}: {e}")
+            except aiohttp.ClientError as e:
+                return False, f"网络错误: {e}"
+            except TimeoutError:
+                return False, "下载头像超时"
+            except Exception as e:
+                logger.warning(f"头像下载失败 {base_char}: {e}")
+                return False, str(e)
+
+        except aiohttp.ClientError as e:
+            return False, f"网络错误: {e}"
+        except TimeoutError:
+            return False, "获取头像超时"
+        except Exception as e:
+            logger.warning(f"获取头像失败 {base_char}: {e}")
+            return False, str(e)

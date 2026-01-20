@@ -93,6 +93,7 @@ class MyPlugin(Star):
             self.custom_cmd_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self.custom_cmd_file, "w", encoding="utf-8") as f:
                 json.dump(self.custom_mappings, f, ensure_ascii=False, indent=2)
+            return True
         except Exception as e:
             logger.error(f"保存自定义指令时发生未知错误: {e}", exc_info=True)
             return False
@@ -128,8 +129,15 @@ class MyPlugin(Star):
 
         # 填充自定义指令
         for trigger, info in self.custom_mappings.items():
+            # 安全检查：确保 info 是字典且包含必要字段
+            if not isinstance(info, dict):
+                logger.warning(f"自定义指令格式错误: {trigger} -> {info}")
+                continue
+            if "character" not in info or "voice" not in info:
+                logger.warning(f"自定义指令缺少必要字段: {trigger} -> {info}")
+                continue
+
             base = info["character"].replace("皮肤", "")
-            # === 核心修改 ===
             lang_code = info.get("lang")
             lang_display = "Auto"
             if lang_code:
@@ -379,7 +387,9 @@ class MyPlugin(Star):
         }
 
         # 保存到 JSON 文件
-        self._save_custom_commands()
+        if not self._save_custom_commands():
+            yield event.plain_result(f"绑定成功，但保存失败，请检查权限")
+            return
 
         yield event.plain_result(f"绑定成功: 「{trigger}」 -> {character} {voice} ")
 
@@ -398,7 +408,9 @@ class MyPlugin(Star):
             del self.custom_mappings[trigger]
 
             # 保存到 JSON 文件
-            self._save_custom_commands()
+            if not self._save_custom_commands():
+                yield event.plain_result(f"已解绑，但保存失败，请检查权限")
+                return
 
             yield event.plain_result(f"已解绑: {trigger}")
         else:

@@ -1,9 +1,16 @@
 import math
 from pathlib import Path
 from typing import List, Dict
-from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
 from astrbot.api import logger
+
+# 尝试导入 jinja2 (可选)
+try:
+    from jinja2 import Template
+
+    HAS_JINJA2 = True
+except ImportError:
+    HAS_JINJA2 = False
 
 
 class VoiceRenderer:
@@ -18,34 +25,23 @@ class VoiceRenderer:
     COLOR_BORDER = (68, 68, 68)
 
     def __init__(self, font_path: str = None):
-        self.font_path = Path(font_path) if font_path else None  # 确保转换为Path对象
+        self.font_path = font_path
         self.plugin_dir = Path(__file__).parent
         self._font_cache = {}  # 字体缓存
 
     def _load_font(self, size: int):
-        """
-        从内存加载字体，避免 Windows 下文件占用锁死
-        """
         if size in self._font_cache:
             return self._font_cache[size]
+
         font = None
-
-        # 1. 尝试加载指定字体
-        if self.font_path and self.font_path.exists():
-            try:
-                with open(self.font_path, "rb") as f:
-                    font_bytes = BytesIO(f.read())
-
-                # 让 PIL 从内存流中加载字体
-                font = ImageFont.truetype(font_bytes, size)
-            except Exception as e:
-                logger.warning(f"加载插件字体失败，尝试系统字体: {e}")
-                font = None
-        if font is None:
+        if self.font_path and Path(self.font_path).exists():
+            font = ImageFont.truetype(self.font_path, size)
+        else:
             try:
                 font = ImageFont.truetype("msyh.ttc", size)
-            except:
+            except (OSError, IOError):
                 font = ImageFont.load_default()
+
         self._font_cache[size] = font
         return font
 
@@ -213,8 +209,8 @@ class VoiceRenderer:
                     try:
                         ava = Image.open(ava_path).resize((60, 60))
                         image.paste(ava, (x + 10, y + 10))
-                    except:
-                        pass
+                    except (OSError, IOError):
+                        pass  # 头像加载失败，使用占位符
                 else:
                     draw.rectangle(
                         [(x + 10, y + 10), (x + 70, y + 70)], fill=(20, 20, 20)
@@ -312,34 +308,3 @@ class VoiceRenderer:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         image.save(out_path)
         return str(out_path.absolute())
-
-    async def render_voice_menu(
-        self,
-        character: str,
-        voice_data: Dict[str, List[str]],
-        lang_config: Dict,
-        voice_descriptions: List[str],
-        assets_dir: Path,
-    ) -> str:
-        """渲染角色菜单 (Dark Mode 适配)"""
-        col_count = 2
-        canvas_width = 1000
-        padding = 30
-        row_height = 140
-        gap_y = 20
-        total_items = len(voice_data)
-        rows = math.ceil(total_items / col_count)
-
-        desc_cols = 6
-        desc_rows = math.ceil(len(voice_descriptions) / desc_cols)
-
-        total_h = 100 + rows * (row_height + gap_y) + (60 + desc_rows * 30) + 60
-
-        image = Image.new("RGB", (canvas_width, total_h), self.COLOR_BG)
-        draw = ImageDraw.Draw(image)
-
-        # 容器
-        draw.rectangle(
-            [(20, 20), (canvas_width - 20, total_h - 20)], fill=self.COLOR_CONTAINER
-        )
-        draw.rectangle
