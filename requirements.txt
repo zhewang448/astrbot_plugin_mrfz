@@ -2,4 +2,3 @@ aiohttp
 beautifulsoup4
 jinja2
 Pillow
-difflib
