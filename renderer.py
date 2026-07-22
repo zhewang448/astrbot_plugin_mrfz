@@ -170,6 +170,43 @@ class VoiceRenderer:
             text = text[:-1]
         return text + ellipsis
 
+    def _fit_font_and_text(
+        self,
+        draw,
+        text: str,
+        max_width: float,
+        *,
+        max_size: int,
+        min_size: int,
+        bold: bool = False,
+        mono: bool = False,
+    ):
+        """Shrink text to the requested minimum before applying an ellipsis."""
+        text = str(text)
+
+        for size in range(max_size, min_size - 1, -1):
+            font = self._load_font(size, bold=bold, mono=mono)
+            if draw.textlength(text, font=font) <= max_width:
+                return font, text
+
+        font = self._load_font(min_size, bold=bold, mono=mono)
+        return font, self._fit_text(draw, text, font, max_width)
+
+    @staticmethod
+    def _split_skin_display_name(name: str) -> Tuple[str, str]:
+        """Split ``角色皮肤 · 皮肤名`` into the two card title lines."""
+        name = str(name).strip() or "UNKNOWN"
+        marker = "皮肤 · "
+
+        if marker in name:
+            operator_name, skin_name = name.rsplit(marker, 1)
+            operator_name = operator_name.strip()
+            skin_name = skin_name.strip()
+            if operator_name and skin_name:
+                return operator_name, skin_name
+
+        return name, "未命名时装"
+
     def _draw_background(self, image: Image.Image, draw: ImageDraw.ImageDraw) -> None:
         width, height = image.size
         draw.rectangle((0, 0, width, height), fill=self.COLOR_BG)
@@ -432,7 +469,9 @@ class VoiceRenderer:
         )
         draw.rectangle((x, y, x + 4, y + height - 10), fill=accent)
 
-        avatar_size = height - 24
+        # Skin cards are slightly taller to fit a two-line title, while the
+        # portrait keeps the same 88 px footprint as regular operator cards.
+        avatar_size = min(height - 24, 88)
         avatar_x, avatar_y = x + 12, y + 12
         self._paste_cut_avatar(
             image, item.get("avatar_path"), avatar_x, avatar_y, avatar_size
@@ -449,19 +488,66 @@ class VoiceRenderer:
         )
 
         text_x = avatar_x + avatar_size + 18
-        name_font = self._load_font(21, bold=True)
-        name = self._fit_text(
-            draw, str(item.get("name", "UNKNOWN")), name_font, width - (text_x - x) - 16
-        )
-        draw.text((text_x, y + 16), name, font=name_font, fill=self.COLOR_TEXT)
+        text_width = width - (text_x - x) - 16
 
-        file_label = "OUTFIT DATA" if is_skin else "OPERATOR FILE"
-        draw.text(
-            (text_x, y + 47),
-            f"{file_label}  /  {index:03d}",
-            font=self._load_font(10, mono=True),
-            fill=accent,
-        )
+        if is_skin:
+            operator_name, skin_name = self._split_skin_display_name(
+                item.get("name", "UNKNOWN")
+            )
+            record_label = f"O-{index:03d}"
+            record_font = self._load_font(9, bold=True, mono=True)
+            record_width = draw.textlength(record_label, font=record_font)
+
+            operator_font, operator_name = self._fit_font_and_text(
+                draw,
+                operator_name,
+                max(40, text_width - record_width - 10),
+                max_size=20,
+                min_size=16,
+                bold=True,
+            )
+            skin_font, skin_name = self._fit_font_and_text(
+                draw,
+                skin_name,
+                text_width,
+                max_size=18,
+                min_size=16,
+                bold=True,
+            )
+
+            draw.text(
+                (text_x, y + 13),
+                operator_name,
+                font=operator_font,
+                fill=self.COLOR_TEXT,
+            )
+            draw.text(
+                (text_x, y + 42),
+                skin_name,
+                font=skin_font,
+                fill=self.COLOR_CYAN,
+            )
+            draw.text(
+                (x + width - record_width - 12, y + 16),
+                record_label,
+                font=record_font,
+                fill=self.COLOR_MUTED,
+            )
+        else:
+            name_font = self._load_font(21, bold=True)
+            name = self._fit_text(
+                draw,
+                str(item.get("name", "UNKNOWN")),
+                name_font,
+                text_width,
+            )
+            draw.text((text_x, y + 16), name, font=name_font, fill=self.COLOR_TEXT)
+            draw.text(
+                (text_x, y + 47),
+                f"OPERATOR FILE  /  {index:03d}",
+                font=self._load_font(10, mono=True),
+                fill=accent,
+            )
         self._draw_language_tags(
             draw, text_x, y + height - 34, item.get("languages", [])
         )
@@ -754,7 +840,9 @@ class VoiceRenderer:
             outline=self.COLOR_LINE,
             width=1,
         )
-        draw.rectangle((diag_x, diag_y, diag_x + diag_w, diag_y + 31), fill=(28, 33, 35))
+        draw.rectangle(
+            (diag_x, diag_y, diag_x + diag_w, diag_y + 31), fill=(28, 33, 35)
+        )
         draw_micro_label(
             diag_x + 13,
             diag_y + 10,
@@ -856,7 +944,9 @@ class VoiceRenderer:
             outline=self.COLOR_LINE,
             cut=12,
         )
-        draw.rectangle((left, route_y, left + 7, route_y + route_h - 12), fill=self.COLOR_CYAN)
+        draw.rectangle(
+            (left, route_y, left + 7, route_y + route_h - 12), fill=self.COLOR_CYAN
+        )
         draw.text(
             (left + 24, route_y + 18),
             "语言设置",
@@ -966,6 +1056,7 @@ class VoiceRenderer:
 
         custom_card_h = 108
         operator_card_h = 112
+        skin_card_h = 124
         modules_cols = 5
         modules_rows = (
             math.ceil(len(voice_descriptions) / modules_cols)
@@ -977,7 +1068,7 @@ class VoiceRenderer:
         total_height = 190
         total_height += self._section_height(len(custom_commands), custom_card_h)
         total_height += self._section_height(len(operators), operator_card_h)
-        total_height += self._section_height(len(skin_operators), operator_card_h)
+        total_height += self._section_height(len(skin_operators), skin_card_h)
         total_height += modules_h + 72
 
         image = self._new_rgba(
@@ -1041,7 +1132,7 @@ class VoiceRenderer:
             skin_operators,
             "时装语音记录",
             "OUTFIT VOICE RECORDS",
-            operator_card_h,
+            skin_card_h,
             skin=True,
         )
 
