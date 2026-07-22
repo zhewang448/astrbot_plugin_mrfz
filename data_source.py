@@ -248,6 +248,17 @@ class VoiceManager:
 
         return character, False, None
 
+    @classmethod
+    def validate_character(cls, character: Any) -> bool:
+        """检查角色或皮肤角色名称是否合法。"""
+        return cls._parse_character_reference(character) is not None
+
+    @classmethod
+    def _base_character(cls, character: Any) -> str:
+        """从角色引用中取得基础角色名。"""
+        parsed = cls._parse_character_reference(character)
+        return parsed[0] if parsed else ""
+
     @staticmethod
     def _path_is_within(
         path: Path,
@@ -692,7 +703,7 @@ class VoiceManager:
 
         return None
 
-    async def choose_language(
+    def choose_language(
         self,
         character: str,
         rank_config: str,
