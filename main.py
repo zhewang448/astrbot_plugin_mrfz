@@ -26,7 +26,7 @@ SCAN_CACHE_DURATION = 60
     "astrbot_plugin_mrfz",
     "bushikq",
     "明日方舟角色语音插件",
-    "3.5.1",
+    "3.6.0",
 )
 class MyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -72,8 +72,8 @@ class MyPlugin(Star):
         self._scan_lock = asyncio.Lock()
         self._cooldowns: Dict[Tuple[str, str], float] = {}
 
-        # 6. 启动后台资源检查
-        self._asset_task = asyncio.create_task(self.voice_mgr.ensure_assets())
+        # 6. 启动后台迁移与资源检查
+        self._startup_task = asyncio.create_task(self._initialize_resources())
 
     # ================== 持久化存储逻辑 ==================
 
@@ -178,11 +178,32 @@ class MyPlugin(Star):
                 except OSError:
                     pass
 
+    async def _initialize_resources(self) -> None:
+        try:
+            await self.voice_mgr.migrate_legacy_skin_directories(
+                self.download_langs,
+            )
+            await self.voice_mgr.refresh_local_skin_metadata()
+            await self.voice_mgr.ensure_assets()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(f"启动资源迁移或检查失败，将在下次启动重试: {exc}")
+
     async def _scan_if_needed(
         self,
         force: bool = False,
     ) -> None:
         """缓存过期或强制刷新时扫描语音文件。"""
+        startup_task = getattr(self, "_startup_task", None)
+
+        if (
+            startup_task is not None
+            and startup_task is not asyncio.current_task()
+            and not startup_task.done()
+        ):
+            await startup_task
+
         async with self._scan_lock:
             current_time = time.monotonic()
 
@@ -191,6 +212,51 @@ class MyPlugin(Star):
                 self._last_scan_time = current_time
 
                 logger.debug(f"执行文件扫描，下次扫描时间: {SCAN_CACHE_DURATION}秒后")
+
+    async def _repair_voice_mapping_if_needed(
+        self,
+        character: str,
+        language: str,
+    ) -> Tuple[bool, str]:
+        if not self.voice_mgr.needs_voice_resource_remap(character, language):
+            return True, ""
+
+        language_info = self.voice_mgr.LANGUAGE_MAP.get(language)
+
+        if not language_info:
+            return False, "语言代码无效"
+
+        logger.info(f"正在校正 {character}/{language} 的旧版语音资源编号")
+        success, message = await self.voice_mgr.fetch_character_voices(
+            character,
+            True,
+            language_info["rank"],
+            require_no_failures=True,
+        )
+
+        repaired = success and not self.voice_mgr.needs_voice_resource_remap(
+            character,
+            language,
+        )
+        return repaired, message
+
+    @staticmethod
+    def _skin_choice_message(
+        character: str,
+        options: list[str],
+    ) -> str:
+        base = VoiceManager._base_character(character) or character
+        option_lines = "\n".join(f"- {option}" for option in options)
+        reason = (
+            f"检测到 {base} 有多套皮肤语音，请指定具体皮肤"
+            if len(options) > 1
+            else f"未找到指定的 {base} 皮肤，当前可用项如下"
+        )
+        return (
+            f"{reason}：\n"
+            f"{option_lines}\n"
+            f"例如：/mrfz {options[0]} 问候 中文"
+        )
 
     @staticmethod
     def _valid_trigger(trigger: object) -> bool:
@@ -245,7 +311,11 @@ class MyPlugin(Star):
                 logger.warning(f"自定义指令缺少必要字段: {trigger} -> {info}")
                 continue
 
-            base = self.voice_mgr._base_character(info["character"])
+            resolved_character, _ = self.voice_mgr.resolve_character_reference(
+                info["character"]
+            )
+            display_character = resolved_character or info["character"]
+            base = self.voice_mgr._base_character(display_character)
             lang_code = info.get("lang")
             lang_display = "Auto"
 
@@ -254,7 +324,7 @@ class MyPlugin(Star):
                 lang_display = lang_conf["name"] if lang_conf else lang_code
             else:
                 auto_code = self.voice_mgr.choose_language(
-                    info["character"],
+                    display_character,
                     self.default_lang_rank,
                 )
 
@@ -270,7 +340,7 @@ class MyPlugin(Star):
             render_data["custom_commands"].append(
                 {
                     "trigger": trigger,
-                    "target": (f"{info['character']} · {info['voice']}"),
+                    "target": (f"{display_character} · {info['voice']}"),
                     "lang_display": lang_display,
                     "avatar_path": str(self.voice_mgr.assets_dir / f"{base}.png"),
                 }
@@ -286,16 +356,9 @@ class MyPlugin(Star):
 
             base, is_skin, skin_id = parsed
 
-            # 新目录会同时生成“角色皮肤”聚合索引和每个具体皮肤索引。
-            # 列表只展示具体皮肤；旧版无皮肤 ID 的目录仍保留聚合项。
+            # 聚合索引只用于识别“角色皮肤”输入，列表仅展示具体皮肤。
             if is_skin and skin_id is None:
-                packages = self.voice_mgr.skin_voice_index.get(base, {})
-                legacy_languages = packages.get("legacy")
-
-                if not legacy_languages:
-                    continue
-
-                languages = list(legacy_languages)
+                continue
 
             lang_items = []
 
@@ -317,7 +380,11 @@ class MyPlugin(Star):
                 )
 
             item = {
-                "name": character,
+                "name": (
+                    f"{base}皮肤 · {skin_id}"
+                    if is_skin and skin_id
+                    else character
+                ),
                 "avatar_path": str(self.voice_mgr.assets_dir / f"{base}.png"),
                 "languages": lang_items,
             }
@@ -360,6 +427,19 @@ class MyPlugin(Star):
             logger.warning(f"忽略字段无效的自定义指令: {msg!r}")
             return
 
+        resolved_character, options = self.voice_mgr.resolve_character_reference(
+            character
+        )
+
+        if not resolved_character:
+            if options:
+                logger.warning(
+                    f"自定义语音绑定未指定具体皮肤，已跳过: {msg!r} -> {character}"
+                )
+            return
+
+        character = resolved_character
+
         if not lang_code:
             lang_code = self.voice_mgr.choose_language(
                 character,
@@ -368,6 +448,17 @@ class MyPlugin(Star):
 
         if lang_code == "nodownload":
             logger.warning(f"自定义语音尚未下载: {character} {voice}")
+            return
+
+        repaired, message = await self._repair_voice_mapping_if_needed(
+            character,
+            lang_code,
+        )
+
+        if not repaired:
+            logger.warning(
+                f"自定义语音旧缓存校正失败: {character}/{lang_code}: {message}"
+            )
             return
 
         path = self.voice_mgr.get_voice_path(
@@ -409,17 +500,41 @@ class MyPlugin(Star):
 
         # 未指定角色时随机选择
         if not character:
-            if not self.voice_mgr.voice_index:
+            playable_characters = []
+
+            for name in self.voice_mgr.voice_index:
+                parsed = self.voice_mgr._parse_character_reference(name)
+
+                if parsed and not (parsed[1] and parsed[2] is None):
+                    playable_characters.append(name)
+
+            if not playable_characters:
                 yield event.plain_result("本地暂无语音，请先使用 /mrfz_fetch 下载")
                 return
 
-            character = random.choice(list(self.voice_mgr.voice_index.keys()))
+            character = random.choice(playable_characters)
 
         character = character.strip()
 
         if not self.voice_mgr.validate_character(character):
             yield event.plain_result("角色名称不合法")
             return
+
+        resolved_character, skin_options = (
+            self.voice_mgr.resolve_character_reference(character)
+        )
+
+        if skin_options and not resolved_character:
+            yield event.plain_result(
+                self._skin_choice_message(
+                    character,
+                    skin_options,
+                )
+            )
+            return
+
+        if resolved_character:
+            character = resolved_character
 
         # 检查角色是否存在
         if character not in self.voice_mgr.voice_index:
@@ -444,6 +559,22 @@ class MyPlugin(Star):
                 )
 
                 character = guessed_character
+
+                resolved_character, skin_options = (
+                    self.voice_mgr.resolve_character_reference(character)
+                )
+
+                if skin_options and not resolved_character:
+                    yield event.plain_result(
+                        self._skin_choice_message(
+                            character,
+                            skin_options,
+                        )
+                    )
+                    return
+
+                if resolved_character:
+                    character = resolved_character
 
             if not guessed_character:
                 if not self.auto_download:
@@ -471,7 +602,23 @@ class MyPlugin(Star):
 
                 await self._scan_if_needed(force=True)
 
-                if character not in (self.voice_mgr.voice_index):
+                resolved_character, skin_options = (
+                    self.voice_mgr.resolve_character_reference(character)
+                )
+
+                if skin_options and not resolved_character:
+                    yield event.plain_result(
+                        self._skin_choice_message(
+                            character,
+                            skin_options,
+                        )
+                    )
+                    return
+
+                if resolved_character:
+                    character = resolved_character
+
+                if character not in self.voice_mgr.voice_index:
                     yield event.plain_result("下载完成，但没有发现可播放的语音文件。")
                     return
 
@@ -491,6 +638,19 @@ class MyPlugin(Star):
         if target_lang == "nodownload":
             yield event.plain_result("该角色没有符合当前语言配置的语音文件。")
             return
+
+        if self.voice_mgr.needs_voice_resource_remap(character, target_lang):
+            yield event.plain_result(
+                f"检测到 {character} 的旧版语音缓存，正在校正资源编号..."
+            )
+            repaired, message = await self._repair_voice_mapping_if_needed(
+                character,
+                target_lang,
+            )
+
+            if not repaired:
+                yield event.plain_result(f"旧版语音缓存校正失败: {message}")
+                return
 
         # 根据实际文件列表选择语音
         if voice:
@@ -596,6 +756,22 @@ class MyPlugin(Star):
 
         await self._scan_if_needed()
 
+        resolved_character, skin_options = (
+            self.voice_mgr.resolve_character_reference(character)
+        )
+
+        if skin_options and not resolved_character:
+            yield event.plain_result(
+                self._skin_choice_message(
+                    character,
+                    skin_options,
+                ).replace("/mrfz ", "/mrfz_bind 触发词 ", 1)
+            )
+            return
+
+        if resolved_character:
+            character = resolved_character
+
         if character not in self.voice_mgr.voice_index:
             yield event.plain_result("角色语音尚未下载，无法绑定")
             return
@@ -617,6 +793,16 @@ class MyPlugin(Star):
             character,
             self.default_lang_rank,
         )
+
+        if resolved_lang != "nodownload":
+            repaired, message = await self._repair_voice_mapping_if_needed(
+                character,
+                resolved_lang,
+            )
+
+            if not repaired:
+                yield event.plain_result(f"旧版语音缓存校正失败: {message}")
+                return
 
         if resolved_lang == "nodownload" or not self.voice_mgr.get_voice_path(
             character,
@@ -782,8 +968,8 @@ class MyPlugin(Star):
             yield event.plain_result(f"帮助生成失败: {exc}")
 
     async def terminate(self):
-        """插件停用或重载时停止后台头像检查任务。"""
-        task = getattr(self, "_asset_task", None)
+        """插件停用或重载时停止后台迁移与资源检查任务。"""
+        task = getattr(self, "_startup_task", None)
 
         if task is None or task.done():
             return

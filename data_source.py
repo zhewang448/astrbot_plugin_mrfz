@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 from io import BytesIO
 from pathlib import Path
@@ -74,6 +75,50 @@ class VoiceManager:
         "生日",
         "周年庆典",
     ]
+
+    # 游戏资源编号并不连续，不能用 VOICE_DESCRIPTIONS 的列表位置拼接 URL。
+    # 例如“编入队伍”和“任命队长”实际使用 CN_017/CN_018，
+    # “问候”“生日”“周年庆典”实际使用 CN_042/CN_043/CN_044。
+    VOICE_RESOURCE_IDS = {
+        "任命助理": 1,
+        "交谈1": 2,
+        "交谈2": 3,
+        "交谈3": 4,
+        "晋升后交谈1": 5,
+        "晋升后交谈2": 6,
+        "信赖提升后交谈1": 7,
+        "信赖提升后交谈2": 8,
+        "信赖提升后交谈3": 9,
+        "闲置": 10,
+        "干员报到": 11,
+        "观看作战记录": 12,
+        "精英化晋升1": 13,
+        "精英化晋升2": 14,
+        "编入队伍": 17,
+        "任命队长": 18,
+        "行动出发": 19,
+        "行动开始": 20,
+        "选中干员1": 21,
+        "选中干员2": 22,
+        "部署1": 23,
+        "部署2": 24,
+        "作战中1": 25,
+        "作战中2": 26,
+        "作战中3": 27,
+        "作战中4": 28,
+        "完成高难行动": 29,
+        "3星结束行动": 30,
+        "非3星结束行动": 31,
+        "行动失败": 32,
+        "进驻设施": 33,
+        "戳一下": 34,
+        "信赖触摸": 36,
+        "标题": 37,
+        "新年祝福": 38,
+        "问候": 42,
+        "生日": 43,
+        "周年庆典": 44,
+    }
 
     LANGUAGE_MAP = {
         "cn": {
@@ -149,6 +194,7 @@ class VoiceManager:
     DOWNLOAD_RETRIES = 3
     CHARACTER_PAGE_RETRIES = 3
     RETRYABLE_PAGE_STATUSES = {429, 500, 502, 503, 504}
+    VOICE_RESOURCE_MAP_VERSION = 2
 
     _SAFE_COMPONENT_RE = re.compile(
         r"^[\w\- .·()（）]+$",
@@ -187,10 +233,21 @@ class VoiceManager:
             ],
         ] = {}
 
+        # 角色 -> 稳定皮肤资源 ID -> 展示名、目录名、各语言 PRTS voice key。
+        self.skin_metadata: Dict[
+            str,
+            Dict[str, Dict[str, Any]],
+        ] = {}
+
         self._download_locks: Dict[
             str,
             asyncio.Lock,
         ] = {}
+
+        # v3 及更早版本按连续编号下载过语音，已有 WAV 可能内容与名称错位。
+        # 迁移按“角色 + 语言”记录，只有整组请求没有真实失败时才清除。
+        self._voice_resource_map_version = self.VOICE_RESOURCE_MAP_VERSION
+        self._voice_remap_pending: set[Tuple[str, str]] = set()
 
         for directory in (
             self.data_dir,
@@ -202,7 +259,93 @@ class VoiceManager:
                 exist_ok=True,
             )
 
+        self._load_skin_metadata()
         self.scan_voice_files()
+
+    def _load_skin_metadata(self) -> None:
+        index_path = self.data_dir / "voice_index.json"
+
+        if not index_path.is_file():
+            return
+
+        try:
+            with index_path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+
+            if payload.get("version") not in {3, 4}:
+                return
+
+            try:
+                self._voice_resource_map_version = int(
+                    payload.get("voice_resource_map_version", 0)
+                )
+            except (TypeError, ValueError):
+                self._voice_resource_map_version = 0
+
+            raw_pending = payload.get("voice_remap_pending", [])
+            if isinstance(raw_pending, list):
+                self._voice_remap_pending = {
+                    (item[0], item[1])
+                    for item in raw_pending
+                    if (
+                        isinstance(item, list)
+                        and len(item) == 2
+                        and self._is_safe_component(
+                            item[0],
+                            self.MAX_CHARACTER_LENGTH,
+                        )
+                        and item[1] in self.LANGUAGE_MAP
+                    )
+                }
+
+            raw_metadata = payload.get("skin_metadata", {})
+
+            if not isinstance(raw_metadata, dict):
+                return
+
+            for character, packages in raw_metadata.items():
+                if (
+                    not self._is_safe_component(character, self.MAX_CHARACTER_LENGTH)
+                    or not isinstance(packages, dict)
+                ):
+                    continue
+
+                for resource_id, info in packages.items():
+                    if (
+                        not self._is_safe_component(resource_id, self.MAX_SKIN_ID_LENGTH)
+                        or not isinstance(info, dict)
+                    ):
+                        continue
+
+                    name = str(info.get("name", "")).strip()
+                    directory = str(info.get("directory", "")).strip()
+                    raw_voice_keys = info.get("voice_keys", {})
+
+                    if (
+                        not self._is_safe_component(name, self.MAX_SKIN_ID_LENGTH)
+                        or not self._is_safe_component(
+                            directory,
+                            self.MAX_SKIN_ID_LENGTH,
+                        )
+                        or not isinstance(raw_voice_keys, dict)
+                    ):
+                        continue
+
+                    voice_keys = {
+                        language: str(voice_key).strip().strip("/")
+                        for language, voice_key in raw_voice_keys.items()
+                        if language in self.LANGUAGE_MAP
+                        and isinstance(voice_key, str)
+                        and voice_key.strip().strip("/")
+                    }
+
+                    self.skin_metadata.setdefault(character, {})[resource_id] = {
+                        "name": name,
+                        "directory": directory,
+                        "voice_keys": voice_keys,
+                    }
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning(f"加载语音索引失败，将从本地目录重建: {exc}")
 
     @classmethod
     def _is_safe_component(
@@ -365,12 +508,17 @@ class VoiceManager:
         except (OSError, ValueError):
             return False
 
-    def _quarantine_invalid_wav(self, path: Path) -> Optional[Path]:
-        """把损坏的旧 WAV 移出语音树，保留原文件供排查。"""
+    def _quarantine_wav(
+        self,
+        path: Path,
+        suffix: str,
+        reason: str,
+    ) -> Optional[Path]:
+        """把不能继续使用的 WAV 移出语音树，保留原文件供排查。"""
         try:
             relative = path.relative_to(self.voices_dir)
             target = self.data_dir / "quarantine" / "voices" / relative
-            target = target.with_name(f"{target.name}.invalid")
+            target = target.with_name(f"{target.name}.{suffix}")
             target.parent.mkdir(parents=True, exist_ok=True)
 
             candidate = target
@@ -381,11 +529,17 @@ class VoiceManager:
                 suffix += 1
 
             path.replace(candidate)
-            logger.warning(f"已隔离损坏的语音文件: {path} -> {candidate}")
+            logger.warning(f"已隔离{reason}的语音文件: {path} -> {candidate}")
             return candidate
         except (OSError, ValueError) as exc:
-            logger.warning(f"隔离损坏语音文件失败 {path}: {exc}")
+            logger.warning(f"隔离{reason}语音文件失败 {path}: {exc}")
             return None
+
+    def _quarantine_invalid_wav(self, path: Path) -> Optional[Path]:
+        return self._quarantine_wav(path, "invalid", "损坏")
+
+    def _quarantine_stale_wav(self, path: Path) -> Optional[Path]:
+        return self._quarantine_wav(path, "stale-map", "旧编号错位")
 
     def _record_flat_character(
         self,
@@ -415,6 +569,153 @@ class VoiceManager:
                 )
             ),
         )
+
+    def _skin_playable_languages(
+        self,
+        base_languages: Dict[str, List[str]],
+        skin_languages: Dict[str, List[str]],
+    ) -> Dict[str, List[str]]:
+        """
+        皮肤包未覆盖的单条语音回退到同语言的角色基础语音。
+
+        只有皮肤包自身存在的语言才会登记，避免把整套不存在的皮肤语言
+        误报为可用。
+        """
+        playable = {}
+
+        for language, skin_voices in skin_languages.items():
+            playable[language] = self._sort_voice_names(
+                list(skin_voices) + list(base_languages.get(language, []))
+            )
+
+        return playable
+
+    @staticmethod
+    def _local_skin_resource_id(
+        character: str,
+        directory: str,
+    ) -> str:
+        digest = hashlib.sha256(
+            f"{character}\0{directory}".encode("utf-8")
+        ).hexdigest()[:12]
+        return f"local_{digest}"
+
+    def _metadata_for_directory(
+        self,
+        character: str,
+        directory: str,
+    ) -> Tuple[str, Dict[str, Any]]:
+        packages = self.skin_metadata.setdefault(character, {})
+
+        for resource_id, info in packages.items():
+            if info.get("directory") == directory:
+                return resource_id, info
+
+        resource_id = self._local_skin_resource_id(character, directory)
+        info = {
+            "name": directory,
+            "directory": directory,
+            "voice_keys": {},
+        }
+        packages[resource_id] = info
+        return resource_id, info
+
+    def _skin_reference(
+        self,
+        character: str,
+        resource_id: str,
+    ) -> Optional[str]:
+        info = self.skin_metadata.get(character, {}).get(resource_id)
+
+        if not info:
+            return None
+
+        name = str(info.get("name", "")).strip()
+
+        if not name:
+            return None
+
+        same_name_ids = [
+            current_id
+            for current_id in self.skin_voice_index.get(character, {})
+            if self.skin_metadata.get(character, {})
+            .get(current_id, {})
+            .get("name")
+            == name
+        ]
+        selector = name if len(same_name_ids) <= 1 else f"{name} · {resource_id}"
+        return f"{character}皮肤[{selector}]"
+
+    def get_skin_options(self, character: str) -> List[str]:
+        """返回某角色当前确实有文件的具体皮肤引用。"""
+        options = []
+
+        for resource_id in self.skin_voice_index.get(character, {}):
+            reference = self._skin_reference(character, resource_id)
+
+            if reference:
+                options.append(reference)
+
+        return sorted(set(options))
+
+    def resolve_character_reference(
+        self,
+        character: str,
+    ) -> Tuple[Optional[str], List[str]]:
+        """
+        把皮肤引用规范化为具体展示名。
+
+        返回 (规范引用, 候选项)。多皮肤未指定或名称无法唯一匹配时，
+        规范引用为 None，并通过候选项提示用户。
+        """
+        parsed = self._parse_character_reference(character)
+
+        if not parsed:
+            return None, []
+
+        base_character, is_skin, selector = parsed
+
+        if not is_skin:
+            reference = base_character
+            return (reference if reference in self.voice_index else None), []
+
+        packages = self.skin_voice_index.get(base_character, {})
+        options = self.get_skin_options(base_character)
+
+        if not packages:
+            return None, []
+
+        if selector is None:
+            if len(options) == 1:
+                return options[0], []
+
+            return None, options
+
+        matches = []
+
+        for resource_id in packages:
+            info = self.skin_metadata.get(base_character, {}).get(resource_id, {})
+            reference = self._skin_reference(base_character, resource_id)
+            reference_selector = (
+                self._parse_character_reference(reference)[2] if reference else None
+            )
+            aliases = {
+                resource_id,
+                str(info.get("name", "")).strip(),
+                str(info.get("directory", "")).strip(),
+                reference_selector,
+            }
+
+            if selector in aliases:
+                if reference:
+                    matches.append(reference)
+
+        matches = sorted(set(matches))
+
+        if len(matches) == 1:
+            return matches[0], []
+
+        return None, matches or options
 
     def scan_voice_files(self) -> None:
         """扫描真实、非空且名称合法的 WAV。"""
@@ -464,20 +765,9 @@ class VoiceManager:
                 Dict[str, List[str]],
             ] = {}
 
-            # 兼容旧目录：
-            # 角色/skin/语言/*.wav
-            legacy_languages = {}
-
-            for language in self.LANGUAGE_MAP:
-                voices = self._scan_language_dir(skin_root / language)
-                if voices:
-                    legacy_languages[language] = voices
-
-            if legacy_languages:
-                packages["legacy"] = legacy_languages
-
             # 新目录：
-            # 角色/skin/皮肤ID/语言/*.wav
+            # 角色/skin/实际目录名/语言/*.wav
+            # 角色/skin/语言/*.wav 属于待迁移旧结构，不再登记或播放。
             try:
                 skin_dirs = sorted(
                     skin_root.iterdir(),
@@ -505,7 +795,11 @@ class VoiceManager:
                         languages[language] = voices
 
                 if languages:
-                    packages[skin_dir.name] = languages
+                    resource_id, _ = self._metadata_for_directory(
+                        character,
+                        skin_dir.name,
+                    )
+                    packages[resource_id] = languages
 
             if not packages:
                 continue
@@ -517,17 +811,27 @@ class VoiceManager:
                 List[str],
             ] = {}
 
-            for skin_id, languages in packages.items():
-                for language, voices in languages.items():
+            for resource_id, languages in packages.items():
+                playable_languages = self._skin_playable_languages(
+                    normal_languages,
+                    languages,
+                )
+
+                for language, voices in playable_languages.items():
                     aggregate.setdefault(
                         language,
                         [],
                     ).extend(voices)
 
-                if skin_id != "legacy":
+                reference = self._skin_reference(
+                    character,
+                    resource_id,
+                )
+
+                if reference:
                     self._record_flat_character(
-                        (f"{character}皮肤[{skin_id}]"),
-                        languages,
+                        reference,
+                        playable_languages,
                     )
 
             for language, voices in aggregate.items():
@@ -538,11 +842,36 @@ class VoiceManager:
                 aggregate,
             )
 
+        if self._voice_resource_map_version < self.VOICE_RESOURCE_MAP_VERSION:
+            if not self._voice_remap_pending:
+                remap_targets = set()
+                for character, languages in self.voice_files.items():
+                    remap_targets.update(
+                        (character, language)
+                        for language in languages
+                    )
+
+                for character, packages in self.skin_voice_index.items():
+                    for languages in packages.values():
+                        remap_targets.update(
+                            (character, language)
+                            for language in languages
+                        )
+
+                self._voice_remap_pending = remap_targets
+
         payload = {
-            "version": 2,
+            "version": 4,
+            "voice_resource_map_version": (
+                self._voice_resource_map_version
+                if self._voice_remap_pending
+                else self.VOICE_RESOURCE_MAP_VERSION
+            ),
+            "voice_remap_pending": sorted(self._voice_remap_pending),
             "voice_index": self.voice_index,
             "voice_files": self.voice_files,
             "skins": self.skin_voice_index,
+            "skin_metadata": self.skin_metadata,
         }
 
         try:
@@ -678,85 +1007,85 @@ class VoiceManager:
         if character_root is None:
             return None
 
-        candidates = []
-
         if not is_skin:
             candidate = self._safe_path(
                 character_root,
                 language,
                 f"{voice_name}.wav",
             )
+        else:
+            resolved, _ = self.resolve_character_reference(character)
 
-            if candidate:
-                candidates.append(candidate)
+            if not resolved:
+                return None
 
-        elif skin_id:
+            resolved_selector = self._parse_character_reference(resolved)[2]
+            resource_id = None
+            directory = None
+
+            for current_id in self.skin_voice_index.get(base_character, {}):
+                info = self.skin_metadata.get(base_character, {}).get(current_id, {})
+                reference = self._skin_reference(base_character, current_id)
+                reference_selector = (
+                    self._parse_character_reference(reference)[2]
+                    if reference
+                    else None
+                )
+
+                if resolved_selector in {
+                    current_id,
+                    info.get("name"),
+                    info.get("directory"),
+                    reference_selector,
+                }:
+                    resource_id = current_id
+                    directory = info.get("directory")
+                    break
+
+            if (
+                resource_id is None
+                or not isinstance(directory, str)
+                or language
+                not in self.skin_voice_index.get(base_character, {}).get(
+                    resource_id,
+                    {},
+                )
+            ):
+                return None
+
             candidate = self._safe_path(
                 character_root,
                 "skin",
-                skin_id,
+                directory,
                 language,
                 f"{voice_name}.wav",
             )
 
-            if candidate:
-                candidates.append(candidate)
+        candidates = [candidate]
 
-            if skin_id == "legacy":
-                legacy = self._safe_path(
+        if is_skin:
+            candidates.append(
+                self._safe_path(
                     character_root,
-                    "skin",
                     language,
                     f"{voice_name}.wav",
                 )
-
-                if legacy:
-                    candidates.append(legacy)
-
-        else:
-            legacy = self._safe_path(
-                character_root,
-                "skin",
-                language,
-                f"{voice_name}.wav",
             )
 
-            if legacy:
-                candidates.append(legacy)
+        for current_candidate in candidates:
+            if current_candidate is None:
+                continue
 
-            package_ids = sorted(
-                self.skin_voice_index.get(
-                    base_character,
-                    {},
-                ).keys()
-            )
-
-            for package_id in package_ids:
-                if package_id == "legacy":
-                    continue
-
-                candidate = self._safe_path(
-                    character_root,
-                    "skin",
-                    package_id,
-                    language,
-                    f"{voice_name}.wav",
-                )
-
-                if candidate:
-                    candidates.append(candidate)
-
-        for candidate in candidates:
             try:
                 if (
-                    candidate.is_file()
-                    and candidate.stat().st_size > 0
+                    current_candidate.is_file()
+                    and self._is_valid_wav_file(current_candidate)
                     and self._path_is_within(
-                        candidate,
+                        current_candidate,
                         character_root,
                     )
                 ):
-                    return candidate
+                    return current_candidate
             except OSError:
                 continue
 
@@ -812,7 +1141,7 @@ class VoiceManager:
         return "(" in label or "（" in label
 
     @classmethod
-    def _skin_id_from_label(
+    def _skin_name_from_label(
         cls,
         label: str,
         voice_key: str,
@@ -843,6 +1172,95 @@ class VoiceManager:
 
         return raw
 
+    @classmethod
+    def _skin_resource_id_from_key(
+        cls,
+        voice_key: str,
+    ) -> str:
+        normalized = str(voice_key).strip().strip("/")
+        raw = normalized.rsplit("/", 1)[-1]
+        raw = re.sub(
+            r"[^\w\- .·()（）]",
+            "_",
+            raw,
+            flags=re.UNICODE,
+        ).strip(" ._")
+
+        if not raw:
+            digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+            raw = f"skin_{digest}"
+
+        if len(raw) > cls.MAX_SKIN_ID_LENGTH:
+            digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+            raw = f"{raw[: cls.MAX_SKIN_ID_LENGTH - 9]}_{digest}"
+
+        return raw
+
+    def _skin_directory_name(
+        self,
+        character: str,
+        resource_id: str,
+        display_name: str,
+    ) -> str:
+        packages = self.skin_metadata.setdefault(character, {})
+        existing = packages.get(resource_id)
+
+        if existing and self._is_safe_component(
+            str(existing.get("directory", "")),
+            self.MAX_SKIN_ID_LENGTH,
+        ):
+            return str(existing["directory"])
+
+        used = {
+            str(info.get("directory", ""))
+            for current_id, info in packages.items()
+            if current_id != resource_id
+        }
+
+        if display_name not in used:
+            return display_name
+
+        digest = hashlib.sha256(resource_id.encode("utf-8")).hexdigest()[:8]
+        suffix = f"_{digest}"
+        return f"{display_name[: self.MAX_SKIN_ID_LENGTH - len(suffix)]}{suffix}"
+
+    def _register_skin_metadata(
+        self,
+        character: str,
+        language_label: str,
+        voice_key: str,
+        language: str,
+    ) -> Tuple[str, str, str]:
+        display_name = self._skin_name_from_label(language_label, voice_key)
+        resource_id = self._skin_resource_id_from_key(voice_key)
+        packages = self.skin_metadata.setdefault(character, {})
+
+        for current_id, info in list(packages.items()):
+            if (
+                current_id.startswith("local_")
+                and info.get("name") == display_name
+                and current_id != resource_id
+            ):
+                packages.pop(current_id, None)
+
+        directory = self._skin_directory_name(
+            character,
+            resource_id,
+            display_name,
+        )
+        info = packages.setdefault(
+            resource_id,
+            {
+                "name": display_name,
+                "directory": directory,
+                "voice_keys": {},
+            },
+        )
+        info["name"] = display_name
+        info["directory"] = directory
+        info.setdefault("voice_keys", {})[language] = voice_key.strip().strip("/")
+        return resource_id, display_name, directory
+
     def _lock_for(
         self,
         character: str,
@@ -855,11 +1273,33 @@ class VoiceManager:
 
         return lock
 
+    def needs_voice_resource_remap(
+        self,
+        character: str,
+        language: Optional[str] = None,
+    ) -> bool:
+        parsed = self._parse_character_reference(character)
+
+        if not parsed:
+            return False
+
+        base_character = parsed[0]
+
+        if language is not None:
+            return (base_character, language) in self._voice_remap_pending
+
+        return any(
+            current_character == base_character
+            for current_character, _ in self._voice_remap_pending
+        )
+
     async def fetch_character_voices(
         self,
         character: str,
         auto_download_skin: bool,
         download_langs: str,
+        *,
+        require_no_failures: bool = False,
     ) -> Tuple[bool, str]:
         parsed = self._parse_character_reference(character)
 
@@ -884,6 +1324,9 @@ class VoiceManager:
                 "not_found": 0,
                 "failed": 0,
             }
+            remap_failed_languages = set()
+            remap_skipped_languages = set()
+            remap_seen_languages = set()
 
             timeout = aiohttp.ClientTimeout(
                 total=30,
@@ -923,41 +1366,53 @@ class VoiceManager:
                         is_skin = self._is_skin_label(language_label)
 
                         if is_skin and not auto_download_skin:
+                            if (base_character, language) in self._voice_remap_pending:
+                                remap_skipped_languages.add(language)
                             continue
 
-                        skin_id = (
-                            self._skin_id_from_label(
+                        remap_seen_languages.add(language)
+                        force_redownload = (
+                            base_character,
+                            language,
+                        ) in self._voice_remap_pending
+
+                        skin_resource_id = None
+                        skin_name = None
+                        skin_directory = None
+
+                        if is_skin:
+                            (
+                                skin_resource_id,
+                                skin_name,
+                                skin_directory,
+                            ) = self._register_skin_metadata(
+                                base_character,
                                 language_label,
                                 str(voice_key),
+                                language,
                             )
-                            if is_skin
-                            else None
-                        )
 
                         encoded_key = quote(
-                            str(voice_key).strip(),
-                            safe="",
+                            str(voice_key).strip().strip("/"),
+                            safe="/",
                         )
 
                         if not encoded_key:
                             counts["failed"] += len(self.VOICE_DESCRIPTIONS)
+                            if force_redownload:
+                                remap_failed_languages.add(language)
                             continue
 
                         display_name = (
-                            (f"{base_character}皮肤[{skin_id}]")
-                            if skin_id
+                            (f"{base_character}皮肤[{skin_name}]")
+                            if skin_resource_id
                             else base_character
                         )
 
                         logger.info(f"正在下载 {display_name} 的 {language} 语音...")
 
-                        for (
-                            file_number,
-                            description,
-                        ) in enumerate(
-                            self.VOICE_DESCRIPTIONS,
-                            start=1,
-                        ):
+                        for description in self.VOICE_DESCRIPTIONS:
+                            file_number = self.VOICE_RESOURCE_IDS[description]
                             file_name = f"cn_{file_number:03d}.wav"
                             voice_url = f"{base_url}/{encoded_key}/{file_name}"
 
@@ -974,7 +1429,8 @@ class VoiceManager:
                                     voice_url,
                                     language,
                                     description,
-                                    skin_id=skin_id,
+                                    skin_directory=skin_directory,
+                                    force_redownload=force_redownload,
                                 )
 
                                 if status != "failed":
@@ -986,6 +1442,8 @@ class VoiceManager:
                             counts[status] += 1
 
                             if status == "failed":
+                                if force_redownload:
+                                    remap_failed_languages.add(language)
                                 logger.warning(
                                     "下载失败 "
                                     f"{display_name}/"
@@ -993,6 +1451,19 @@ class VoiceManager:
                                     f"{description}: "
                                     f"{message}"
                                 )
+
+                    for language in remap_seen_languages:
+                        if language not in remap_failed_languages and (
+                            language not in remap_skipped_languages
+                        ):
+                            self._voice_remap_pending.discard(
+                                (base_character, language)
+                            )
+
+                    if not self._voice_remap_pending:
+                        self._voice_resource_map_version = (
+                            self.VOICE_RESOURCE_MAP_VERSION
+                        )
 
                     (
                         image_ok,
@@ -1023,7 +1494,11 @@ class VoiceManager:
 
             self.scan_voice_files()
 
-            success = counts["downloaded"] > 0 or counts["existed"] > 0
+            success = (
+                counts["downloaded"] > 0 or counts["existed"] > 0
+            ) and (
+                not require_no_failures or counts["failed"] == 0
+            )
 
             summary = (
                 "下载完成："
@@ -1035,6 +1510,222 @@ class VoiceManager:
 
             return success, summary
 
+    async def migrate_legacy_skin_directories(
+        self,
+        download_langs: str,
+    ) -> None:
+        """
+        把 角色/skin/语言/*.wav 旧结构迁移到具名皮肤目录。
+
+        旧文件只用于确认需要迁移的语言。只有 PRTS 下载成功且新结构中
+        已有对应语音后，才删除该语言的旧目录；失败时保留供下次启动重试。
+        """
+        migrations: Dict[str, Dict[str, List[str]]] = {}
+
+        try:
+            character_dirs = list(self.voices_dir.iterdir())
+        except OSError as exc:
+            logger.warning(f"检查旧版皮肤目录失败: {exc}")
+            return
+
+        for character_dir in character_dirs:
+            if (
+                not character_dir.is_dir()
+                or not self._is_safe_component(
+                    character_dir.name,
+                    self.MAX_CHARACTER_LENGTH,
+                )
+            ):
+                continue
+
+            skin_root = character_dir / "skin"
+            legacy_languages = {}
+
+            for language in self.LANGUAGE_MAP:
+                voices = self._scan_language_dir(skin_root / language)
+
+                if voices:
+                    legacy_languages[language] = voices
+
+            if legacy_languages:
+                migrations[character_dir.name] = legacy_languages
+
+        if not migrations:
+            return
+
+        configured_ranks = {
+            rank
+            for rank in str(download_langs)
+            if rank in {item["rank"] for item in self.LANGUAGE_MAP.values()}
+        }
+
+        for character, legacy_languages in migrations.items():
+            required_ranks = {
+                self.LANGUAGE_MAP[language]["rank"]
+                for language in legacy_languages
+            }
+            selected_ranks = "".join(
+                sorted(
+                    configured_ranks | required_ranks,
+                    key=int,
+                )
+            )
+
+            logger.info(
+                f"检测到 {character} 的旧版皮肤目录，正在从 PRTS 迁移具名皮肤"
+            )
+            success, message = await self.fetch_character_voices(
+                character,
+                True,
+                selected_ranks,
+                require_no_failures=True,
+            )
+
+            if not success:
+                logger.warning(
+                    f"{character} 旧版皮肤迁移暂缓，已保留原文件: {message}"
+                )
+                continue
+
+            self.scan_voice_files()
+            packages = self.skin_voice_index.get(character, {})
+            skin_root = self.voices_dir / character / "skin"
+
+            for language, old_voices in legacy_languages.items():
+                new_voice_sets = [
+                    set(languages.get(language, []))
+                    for languages in packages.values()
+                    if languages.get(language)
+                ]
+                skin_voices = (
+                    set().union(*new_voice_sets)
+                    if new_voice_sets
+                    else set()
+                )
+                missing_voices = [
+                    voice for voice in old_voices if voice not in skin_voices
+                ]
+                verified = bool(new_voice_sets) and not missing_voices
+
+                if not verified:
+                    package_names = [
+                        str(
+                            self.skin_metadata.get(character, {})
+                            .get(resource_id, {})
+                            .get("name", resource_id)
+                        )
+                        for resource_id in packages
+                        if packages[resource_id].get(language)
+                    ]
+                    logger.warning(
+                        f"{character}/{language} 的新皮肤资源未完整确认，"
+                        f"旧文件 {len(old_voices)} 个，"
+                        f"皮肤文件 {len(skin_voices)} 个，"
+                        f"缺失 {len(missing_voices)} 个，保留旧目录；"
+                        f"新皮肤: {', '.join(package_names) or '无'}；"
+                        f"缺失项: {', '.join(missing_voices[:8])}"
+                        f"{' ...' if len(missing_voices) > 8 else ''}"
+                    )
+                    continue
+
+                legacy_dir = skin_root / language
+
+                logger.info(
+                    f"{character}/{language} 的新皮肤资源已完整确认："
+                    f"旧文件 {len(old_voices)} 个，"
+                    f"皮肤文件 {len(skin_voices)} 个"
+                )
+
+                try:
+                    resolved_legacy = legacy_dir.resolve()
+                    resolved_skin_root = skin_root.resolve()
+                    resolved_legacy.relative_to(resolved_skin_root)
+
+                    if (
+                        resolved_legacy.parent != resolved_skin_root
+                        or resolved_legacy.name != language
+                        or language not in self.LANGUAGE_MAP
+                    ):
+                        raise ValueError("旧目录路径校验失败")
+
+                    shutil.rmtree(resolved_legacy)
+                    logger.info(f"已迁移并移除旧版皮肤目录: {legacy_dir}")
+                except (OSError, RuntimeError, ValueError) as exc:
+                    logger.warning(f"移除旧版皮肤目录失败 {legacy_dir}: {exc}")
+
+        self.scan_voice_files()
+
+    async def refresh_local_skin_metadata(self) -> None:
+        """
+        为旧版已分目录、但尚无 PRTS 稳定 ID 的皮肤补齐元数据。
+
+        local_* ID 只用于离线过渡。这里仅请求角色语音页补齐映射，
+        不重新下载音频；后续正常下载仍会复用合法 WAV，只补缺失或损坏项。
+        """
+        self.scan_voice_files()
+        pending = []
+
+        for character, packages in self.skin_voice_index.items():
+            if any(resource_id.startswith("local_") for resource_id in packages):
+                pending.append(character)
+
+        if not pending:
+            return
+
+        timeout = aiohttp.ClientTimeout(
+            total=30,
+            connect=10,
+        )
+
+        async with aiohttp.ClientSession(
+            headers=self.DEFAULT_HEADERS,
+            timeout=timeout,
+        ) as session:
+            for character in pending:
+                logger.info(f"正在为 {character} 的现有皮肤目录补齐 PRTS 稳定索引")
+
+                try:
+                    character_map = await self._get_character_id_map(
+                        character,
+                        session=session,
+                    )
+
+                    for language_label, voice_key in (character_map or {}).items():
+                        if (
+                            language_label == "语音key"
+                            or not self._is_skin_label(language_label)
+                        ):
+                            continue
+
+                        language = self._language_from_label(language_label)
+                        self._register_skin_metadata(
+                            character,
+                            language_label,
+                            str(voice_key),
+                            language,
+                        )
+                except (
+                    PRTSLookupError,
+                    aiohttp.ClientError,
+                    asyncio.TimeoutError,
+                ) as exc:
+                    logger.warning(
+                        f"{character} 的皮肤稳定索引暂未补齐，"
+                        f"将在下次启动重试: {exc}"
+                    )
+
+        self.scan_voice_files()
+
+        for character in pending:
+            if any(
+                resource_id.startswith("local_")
+                for resource_id in self.skin_voice_index.get(character, {})
+            ):
+                logger.warning(
+                    f"{character} 仍有无法与 PRTS 对应的本地皮肤目录，"
+                    "已保留离线索引"
+                )
+
     async def _download_single_voice(
         self,
         session: aiohttp.ClientSession,
@@ -1043,7 +1734,8 @@ class VoiceManager:
         lang: str,
         filename: str,
         *,
-        skin_id: Optional[str] = None,
+        skin_directory: Optional[str] = None,
+        force_redownload: bool = False,
     ) -> Tuple[str, str]:
         """
         返回 downloaded/existed/not_found/failed。
@@ -1064,13 +1756,13 @@ class VoiceManager:
                 "语言或语音名称不合法",
             )
 
-        if skin_id and not self._is_safe_component(
-            skin_id,
+        if skin_directory and not self._is_safe_component(
+            skin_directory,
             self.MAX_SKIN_ID_LENGTH,
         ):
             return (
                 "failed",
-                "皮肤 ID 不合法",
+                "皮肤目录名不合法",
             )
 
         character_root = self._safe_path(
@@ -1084,11 +1776,11 @@ class VoiceManager:
                 "目标路径越界",
             )
 
-        if skin_id:
+        if skin_directory:
             save_dir = self._safe_path(
                 character_root,
                 "skin",
-                skin_id,
+                skin_directory,
                 lang,
             )
         else:
@@ -1120,7 +1812,7 @@ class VoiceManager:
                 exist_ok=True,
             )
 
-            if path.is_file():
+            if path.is_file() and not force_redownload:
                 if self._is_valid_wav_file(path):
                     return (
                         "existed",
@@ -1144,6 +1836,16 @@ class VoiceManager:
                 allow_redirects=True,
             ) as response:
                 if response.status == 404:
+                    if (
+                        force_redownload
+                        and path.is_file()
+                        and self._quarantine_stale_wav(path) is None
+                    ):
+                        return (
+                            "failed",
+                            "新编号资源不存在，且旧编号缓存无法隔离",
+                        )
+
                     return (
                         "not_found",
                         "文件不存在(404)",

@@ -549,82 +549,412 @@ class VoiceRenderer:
 
     def _render_help_logic(self) -> str:
         width = self.CANVAS_WIDTH
-        commands = [
-            (
-                "/mrfz [角色] [语音] [语言]",
-                "查询并播放干员语音；语音和语言均可省略",
-                "/mrfz 凯尔希 问候 中文",
-            ),
-            ("/mrfz_list", "查看本地已登记干员、时装和语言索引", "/mrfz_list"),
-            (
-                "/mrfz_fetch [角色名]",
-                "[管理员] 从 PRTS Wiki 获取干员语音资料",
-                "/mrfz_fetch 陈",
-            ),
-            (
-                "/mrfz_bind [触发] [角色] [语音] [语言]",
-                "[管理员] 建立一条自定义快捷触发指令",
-                "/mrfz_bind 早安 阿米娅 问候 中文",
-            ),
-            (
-                "/mrfz_unbind [触发词]",
-                "[管理员] 移除已经登记的快捷触发词",
-                "/mrfz_unbind 早安",
-            ),
-        ]
-        row_height = 118
-        start_y = 190
-        total_height = start_y + len(commands) * (row_height + 14) + 82
-
-        image = self._new_rgba((width, total_height), self.COLOR_BG + (255,))
+        height = 1440
+        image = self._new_rgba((width, height), self.COLOR_BG + (255,))
         draw = ImageDraw.Draw(image)
         self._draw_background(image, draw)
-        self._draw_header(draw, width, page_code="MAN-01", title="终端操作手册")
+        self._draw_header(draw, width, page_code="TRM-01", title="明日方舟语音帮助")
 
-        y = start_y
-        for index, (command, description, example) in enumerate(commands, 1):
-            x = self.PAGE_MARGIN
-            panel_w = width - self.PAGE_MARGIN * 2
+        left = self.PAGE_MARGIN
+        content_width = width - self.PAGE_MARGIN * 2
+
+        def draw_micro_label(x, y, text, *, color=None):
+            draw.text(
+                (x, y),
+                text,
+                font=self._load_font(10, bold=True, mono=True),
+                fill=color or self.COLOR_SUB,
+            )
+
+        def draw_status_light(x, y, label, *, active=True):
+            color = self.COLOR_CYAN if active else self.COLOR_MUTED
+            draw.ellipse((x, y + 2, x + 9, y + 11), fill=color)
+            draw.text(
+                (x + 17, y),
+                label,
+                font=self._load_font(10, mono=True),
+                fill=self.COLOR_TEXT if active else self.COLOR_SUB,
+            )
+
+        def draw_command_card(
+            x,
+            y,
+            card_width,
+            number,
+            command,
+            description,
+            example,
+            *,
+            admin=False,
+        ):
+            card_height = 178
             self._draw_cut_panel(
                 draw,
-                (x, y, panel_w, row_height),
+                (x, y, card_width, card_height),
                 fill=self.COLOR_CARD,
                 outline=self.COLOR_LINE,
+                cut=10,
             )
-            draw.rectangle((x, y, x + 8, y + row_height - 12), fill=self.COLOR_YELLOW)
+            accent = self.COLOR_RED if admin else self.COLOR_CYAN
+            draw.rectangle((x, y, x + 6, y + card_height - 10), fill=accent)
             draw.text(
-                (x + 24, y + 16),
-                f"{index:02d}",
-                font=self._load_font(38, bold=True, mono=True),
-                fill=(72, 79, 81),
+                (x + 22, y + 16),
+                f"{number:02d}",
+                font=self._load_font(34, bold=True, mono=True),
+                fill=(70, 78, 80),
             )
+            draw_micro_label(
+                x + 78,
+                y + 15,
+                "ADMINISTRATOR ROUTE" if admin else "PUBLIC ACCESS ROUTE",
+                color=accent,
+            )
+            command_font = self._load_font(21, bold=True, mono=True)
+            if draw.textlength(command, font=command_font) > card_width - 100:
+                command_font = self._load_font(17, bold=True, mono=True)
             draw.text(
-                (x + 92, y + 14),
+                (x + 78, y + 37),
                 command,
-                font=self._load_font(22, bold=True, mono=True),
+                font=command_font,
                 fill=self.COLOR_YELLOW,
             )
             draw.text(
-                (x + 92, y + 53),
+                (x + 22, y + 82),
                 description,
-                font=self._load_font(17),
+                font=self._load_font(15),
                 fill=self.COLOR_TEXT,
             )
+            draw.line(
+                (x + 22, y + 116, x + card_width - 22, y + 116),
+                fill=self.COLOR_LINE,
+                width=1,
+            )
+            draw_micro_label(x + 22, y + 128, "EXECUTION SAMPLE")
             draw.text(
-                (x + 92, y + 83),
-                f"EXAMPLE  //  {example}",
+                (x + 22, y + 145),
+                example,
                 font=self._load_font(12, mono=True),
                 fill=self.COLOR_SUB,
             )
+            draw_status_light(
+                x + card_width - 92,
+                y + 17,
+                "LOCK" if admin else "OPEN",
+                active=not admin,
+            )
+
+        # Compact system telemetry band.
+        band_y = 178
+        self._draw_cut_panel(
+            draw,
+            (left, band_y, content_width, 54),
+            fill=self.COLOR_PANEL,
+            outline=self.COLOR_LINE,
+            cut=8,
+        )
+        draw.rectangle((left, band_y, left + 6, band_y + 46), fill=self.COLOR_CYAN)
+        draw_micro_label(left + 20, band_y + 10, "PRTS VOICE CONTROL SYSTEM")
+        draw.text(
+            (left + 20, band_y + 27),
+            "LOCAL TERMINAL READY",
+            font=self._load_font(12, bold=True, mono=True),
+            fill=self.COLOR_TEXT,
+        )
+        draw_status_light(left + 365, band_y + 20, "INDEX ONLINE")
+        draw_status_light(left + 525, band_y + 20, "VOICE ROUTE")
+        draw_status_light(left + 675, band_y + 20, "ASSET LINK")
+        draw.text(
+            (left + content_width - 104, band_y + 17),
+            "05 / CMD",
+            font=self._load_font(15, bold=True, mono=True),
+            fill=self.COLOR_YELLOW,
+        )
+
+        # Primary command console.
+        primary_y = 250
+        primary_h = 260
+        self._draw_cut_panel(
+            draw,
+            (left, primary_y, content_width, primary_h),
+            fill=(17, 21, 23),
+            outline=self.COLOR_LINE,
+            cut=14,
+            width=2,
+        )
+        draw.rectangle(
+            (left, primary_y, left + 9, primary_y + primary_h - 14),
+            fill=self.COLOR_YELLOW,
+        )
+        draw.text(
+            (left + 28, primary_y + 17),
+            "01",
+            font=self._load_font(52, bold=True, mono=True),
+            fill=(64, 72, 74),
+        )
+        draw_micro_label(
+            left + 116,
+            primary_y + 20,
+            "PRIMARY PLAYBACK CONTROL / PUBLIC ACCESS",
+            color=self.COLOR_CYAN,
+        )
+        draw.text(
+            (left + 116, primary_y + 48),
+            "/mrfz",
+            font=self._load_font(40, bold=True, mono=True),
+            fill=self.COLOR_YELLOW,
+        )
+        draw.text(
+            (left + 116, primary_y + 102),
+            "查询并播放干员语音",
+            font=self._load_font(21, bold=True),
+            fill=self.COLOR_TEXT,
+        )
+        draw.text(
+            (left + 116, primary_y + 137),
+            "角色可模糊匹配；多皮肤可用 [皮肤名] 精确指定。",
+            font=self._load_font(15),
+            fill=self.COLOR_SUB,
+        )
+
+        syntax_x = left + 116
+        syntax_y = primary_y + 181
+        syntax_items = (
+            ("角色", "REQUIRED", 138),
+            ("语音", "OPTIONAL", 138),
+            ("语言", "OPTIONAL", 138),
+        )
+        for label, state, box_width in syntax_items:
+            self._draw_cut_panel(
+                draw,
+                (syntax_x, syntax_y, box_width, 51),
+                fill=self.COLOR_CARD,
+                outline=self.COLOR_LINE,
+                cut=7,
+            )
             draw.text(
-                (x + panel_w - 138, y + 87),
-                "ACCESS / OK",
-                font=self._load_font(10, mono=True),
+                (syntax_x + 14, syntax_y + 7),
+                f"[{label}]",
+                font=self._load_font(16, bold=True),
+                fill=self.COLOR_TEXT,
+            )
+            draw_micro_label(
+                syntax_x + 14,
+                syntax_y + 31,
+                state,
+                color=self.COLOR_YELLOW if state == "REQUIRED" else self.COLOR_CYAN,
+            )
+            syntax_x += box_width + 10
+
+        diag_x = left + 682
+        diag_y = primary_y + 24
+        diag_w = content_width - 710
+        draw.rectangle(
+            (diag_x, diag_y, diag_x + diag_w, diag_y + 210),
+            fill=self.COLOR_BLACK,
+            outline=self.COLOR_LINE,
+            width=1,
+        )
+        draw.rectangle((diag_x, diag_y, diag_x + diag_w, diag_y + 31), fill=(28, 33, 35))
+        draw_micro_label(
+            diag_x + 13,
+            diag_y + 10,
+            "ROUTE PREVIEW / SAMPLE",
+            color=self.COLOR_YELLOW,
+        )
+        draw.text(
+            (diag_x + 15, diag_y + 51),
+            "/mrfz W皮肤[恍惚]",
+            font=self._load_font(16, bold=True, mono=True),
+            fill=self.COLOR_TEXT,
+        )
+        draw.text(
+            (diag_x + 15, diag_y + 82),
+            "问候  中文",
+            font=self._load_font(16, mono=True),
+            fill=self.COLOR_CYAN,
+        )
+        draw.line(
+            (diag_x + 15, diag_y + 117, diag_x + diag_w - 15, diag_y + 117),
+            fill=self.COLOR_LINE,
+        )
+        draw_micro_label(diag_x + 15, diag_y + 132, "AUTO RESOLVE")
+        draw.text(
+            (diag_x + 15, diag_y + 153),
+            "OPERATOR  >  VOICE  >  LANG",
+            font=self._load_font(11, mono=True),
+            fill=self.COLOR_SUB,
+        )
+        draw_status_light(diag_x + 15, diag_y + 181, "PLAYBACK READY")
+
+        # Secondary command matrix.
+        section_y = 534
+        draw.text(
+            (left, section_y),
+            "功能指令",
+            font=self._load_font(23, bold=True),
+            fill=self.COLOR_TEXT,
+        )
+        draw_micro_label(left + 190, section_y + 10, "TERMINAL FUNCTION MATRIX / 02-05")
+        draw.line(
+            (left, section_y + 39, left + content_width, section_y + 39),
+            fill=self.COLOR_LINE,
+        )
+        draw.rectangle(
+            (left, section_y + 37, left + 128, section_y + 42),
+            fill=self.COLOR_YELLOW,
+        )
+
+        gap = 14
+        card_width = (content_width - gap) // 2
+        draw_command_card(
+            left,
+            592,
+            card_width,
+            2,
+            "/mrfz_list",
+            "读取本地干员、时装与语言索引。",
+            "/mrfz_list",
+        )
+        draw_command_card(
+            left + card_width + gap,
+            592,
+            card_width,
+            3,
+            "/mrfz_fetch [角色]",
+            "从 PRTS 获取指定干员语音资料。",
+            "/mrfz_fetch 陈",
+            admin=True,
+        )
+        draw_command_card(
+            left,
+            784,
+            card_width,
+            4,
+            "/mrfz_bind [触发] [角色] [语音] [语言]",
+            "建立一条自定义快捷语音触发指令。",
+            "/mrfz_bind 早安 阿米娅 问候 中文",
+            admin=True,
+        )
+        draw_command_card(
+            left + card_width + gap,
+            784,
+            card_width,
+            5,
+            "/mrfz_unbind [触发词]",
+            "移除已经登记的快捷语音触发词。",
+            "/mrfz_unbind 早安",
+            admin=True,
+        )
+
+        # Language routing panel.
+        route_y = 986
+        route_h = 302
+        self._draw_cut_panel(
+            draw,
+            (left, route_y, content_width, route_h),
+            fill=self.COLOR_PANEL,
+            outline=self.COLOR_LINE,
+            cut=12,
+        )
+        draw.rectangle((left, route_y, left + 7, route_y + route_h - 12), fill=self.COLOR_CYAN)
+        draw.text(
+            (left + 24, route_y + 18),
+            "语言设置",
+            font=self._load_font(22, bold=True),
+            fill=self.COLOR_TEXT,
+        )
+        draw_micro_label(
+            left + 190,
+            route_y + 27,
+            "MULTILINGUAL VOICE ROUTING ARRAY",
+            color=self.COLOR_CYAN,
+        )
+        draw.text(
+            (left + content_width - 154, route_y + 19),
+            "6 CHANNELS",
+            font=self._load_font(13, bold=True, mono=True),
+            fill=self.COLOR_YELLOW,
+        )
+        draw.line(
+            (left + 24, route_y + 58, left + content_width - 24, route_y + 58),
+            fill=self.COLOR_LINE,
+        )
+
+        languages = (
+            ("01", "方言", "DIALECT", "fy"),
+            ("02", "中文", "MANDARIN", "cn"),
+            ("03", "日语", "JAPANESE", "jp"),
+            ("04", "英语", "ENGLISH", "us"),
+            ("05", "韩语", "KOREAN", "kr"),
+            ("06", "意语", "ITALIAN", "it"),
+        )
+        lane_gap = 10
+        lane_width = (content_width - 48 - lane_gap * 2) // 3
+        lane_height = 88
+        lane_start_x = left + 24
+        lane_start_y = route_y + 76
+
+        for index, (rank, name, english, code) in enumerate(languages):
+            row, col = divmod(index, 3)
+            lane_x = lane_start_x + col * (lane_width + lane_gap)
+            lane_y = lane_start_y + row * (lane_height + 12)
+            self._draw_cut_panel(
+                draw,
+                (lane_x, lane_y, lane_width, lane_height),
+                fill=self.COLOR_CARD,
+                outline=self.COLOR_LINE,
+                cut=8,
+            )
+            draw.rectangle(
+                (lane_x, lane_y, lane_x + 5, lane_y + lane_height - 8),
+                fill=self.COLOR_YELLOW if index < 3 else self.COLOR_CYAN,
+            )
+            draw.text(
+                (lane_x + 15, lane_y + 11),
+                rank,
+                font=self._load_font(26, bold=True, mono=True),
+                fill=(72, 80, 82),
+            )
+            draw.text(
+                (lane_x + 58, lane_y + 12),
+                name,
+                font=self._load_font(18, bold=True),
+                fill=self.COLOR_TEXT,
+            )
+            draw_micro_label(lane_x + 58, lane_y + 40, english)
+            draw.text(
+                (lane_x + lane_width - 53, lane_y + 26),
+                code.upper(),
+                font=self._load_font(14, bold=True, mono=True),
                 fill=self.COLOR_CYAN,
             )
-            y += row_height + 14
+            draw_status_light(lane_x + 58, lane_y + 62, "ROUTE READY")
 
-        self._draw_footer(draw, width, total_height)
+        # Operational footer strip above the standard renderer footer.
+        status_y = 1311
+        draw.rectangle(
+            (left, status_y, left + content_width, status_y + 48),
+            fill=self.COLOR_BLACK,
+            outline=self.COLOR_LINE,
+        )
+        draw_micro_label(left + 15, status_y + 9, "使用权限")
+        draw.text(
+            (left + 15, status_y + 25),
+            "PLAY / LIST 公开访问",
+            font=self._load_font(11, mono=True),
+            fill=self.COLOR_CYAN,
+        )
+        draw_micro_label(left + 310, status_y + 9, "管理员功能")
+        draw.text(
+            (left + 310, status_y + 25),
+            "FETCH / BIND / UNBIND",
+            font=self._load_font(11, mono=True),
+            fill=self.COLOR_RED,
+        )
+        draw_micro_label(left + 650, status_y + 9, "运行状态")
+        draw_status_light(left + 650, status_y + 25, "ALL SYSTEMS NOMINAL")
+
+        self._draw_footer(draw, width, height)
         output_path = self._save_output(image.convert("RGB"), "help")
         return str(output_path.absolute())
 
