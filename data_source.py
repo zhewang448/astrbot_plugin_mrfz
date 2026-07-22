@@ -35,48 +35,7 @@ class VoiceManager:
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     }
 
-    VOICE_DESCRIPTIONS = [
-        "任命助理",
-        "交谈1",
-        "交谈2",
-        "交谈3",
-        "晋升后交谈1",
-        "晋升后交谈2",
-        "信赖提升后交谈1",
-        "信赖提升后交谈2",
-        "信赖提升后交谈3",
-        "闲置",
-        "干员报到",
-        "观看作战记录",
-        "精英化晋升1",
-        "精英化晋升2",
-        "编入队伍",
-        "任命队长",
-        "行动出发",
-        "行动开始",
-        "选中干员1",
-        "选中干员2",
-        "部署1",
-        "部署2",
-        "作战中1",
-        "作战中2",
-        "作战中3",
-        "作战中4",
-        "完成高难行动",
-        "3星结束行动",
-        "非3星结束行动",
-        "行动失败",
-        "进驻设施",
-        "戳一下",
-        "信赖触摸",
-        "标题",
-        "新年祝福",
-        "问候",
-        "生日",
-        "周年庆典",
-    ]
-
-    # 游戏资源编号并不连续，不能用 VOICE_DESCRIPTIONS 的列表位置拼接 URL。
+    # 游戏资源编号并不连续，不能用语音名称的列表位置拼接 URL。
     # 例如“编入队伍”和“任命队长”实际使用 CN_017/CN_018，
     # “问候”“生日”“周年庆典”实际使用 CN_042/CN_043/CN_044。
     VOICE_RESOURCE_IDS = {
@@ -119,6 +78,10 @@ class VoiceManager:
         "生日": 43,
         "周年庆典": 44,
     }
+
+    # 字典插入顺序即列表显示和随机选择使用的语音顺序。
+    # 名称列表由资源映射派生，避免两份常量各自维护后发生错位。
+    VOICE_DESCRIPTIONS = list(VOICE_RESOURCE_IDS)
 
     LANGUAGE_MAP = {
         "cn": {
@@ -304,17 +267,15 @@ class VoiceManager:
                 return
 
             for character, packages in raw_metadata.items():
-                if (
-                    not self._is_safe_component(character, self.MAX_CHARACTER_LENGTH)
-                    or not isinstance(packages, dict)
-                ):
+                if not self._is_safe_component(
+                    character, self.MAX_CHARACTER_LENGTH
+                ) or not isinstance(packages, dict):
                     continue
 
                 for resource_id, info in packages.items():
-                    if (
-                        not self._is_safe_component(resource_id, self.MAX_SKIN_ID_LENGTH)
-                        or not isinstance(info, dict)
-                    ):
+                    if not self._is_safe_component(
+                        resource_id, self.MAX_SKIN_ID_LENGTH
+                    ) or not isinstance(info, dict):
                         continue
 
                     name = str(info.get("name", "")).strip()
@@ -638,9 +599,7 @@ class VoiceManager:
         same_name_ids = [
             current_id
             for current_id in self.skin_voice_index.get(character, {})
-            if self.skin_metadata.get(character, {})
-            .get(current_id, {})
-            .get("name")
+            if self.skin_metadata.get(character, {}).get(current_id, {}).get("name")
             == name
         ]
         selector = name if len(same_name_ids) <= 1 else f"{name} · {resource_id}"
@@ -847,15 +806,13 @@ class VoiceManager:
                 remap_targets = set()
                 for character, languages in self.voice_files.items():
                     remap_targets.update(
-                        (character, language)
-                        for language in languages
+                        (character, language) for language in languages
                     )
 
                 for character, packages in self.skin_voice_index.items():
                     for languages in packages.values():
                         remap_targets.update(
-                            (character, language)
-                            for language in languages
+                            (character, language) for language in languages
                         )
 
                 self._voice_remap_pending = remap_targets
@@ -1027,9 +984,7 @@ class VoiceManager:
                 info = self.skin_metadata.get(base_character, {}).get(current_id, {})
                 reference = self._skin_reference(base_character, current_id)
                 reference_selector = (
-                    self._parse_character_reference(reference)[2]
-                    if reference
-                    else None
+                    self._parse_character_reference(reference)[2] if reference else None
                 )
 
                 if resolved_selector in {
@@ -1411,8 +1366,7 @@ class VoiceManager:
 
                         logger.info(f"正在下载 {display_name} 的 {language} 语音...")
 
-                        for description in self.VOICE_DESCRIPTIONS:
-                            file_number = self.VOICE_RESOURCE_IDS[description]
+                        for description, file_number in self.VOICE_RESOURCE_IDS.items():
                             file_name = f"cn_{file_number:03d}.wav"
                             voice_url = f"{base_url}/{encoded_key}/{file_name}"
 
@@ -1494,9 +1448,7 @@ class VoiceManager:
 
             self.scan_voice_files()
 
-            success = (
-                counts["downloaded"] > 0 or counts["existed"] > 0
-            ) and (
+            success = (counts["downloaded"] > 0 or counts["existed"] > 0) and (
                 not require_no_failures or counts["failed"] == 0
             )
 
@@ -1529,12 +1481,9 @@ class VoiceManager:
             return
 
         for character_dir in character_dirs:
-            if (
-                not character_dir.is_dir()
-                or not self._is_safe_component(
-                    character_dir.name,
-                    self.MAX_CHARACTER_LENGTH,
-                )
+            if not character_dir.is_dir() or not self._is_safe_component(
+                character_dir.name,
+                self.MAX_CHARACTER_LENGTH,
             ):
                 continue
 
@@ -1561,8 +1510,7 @@ class VoiceManager:
 
         for character, legacy_languages in migrations.items():
             required_ranks = {
-                self.LANGUAGE_MAP[language]["rank"]
-                for language in legacy_languages
+                self.LANGUAGE_MAP[language]["rank"] for language in legacy_languages
             }
             selected_ranks = "".join(
                 sorted(
@@ -1571,9 +1519,7 @@ class VoiceManager:
                 )
             )
 
-            logger.info(
-                f"检测到 {character} 的旧版皮肤目录，正在从 PRTS 迁移具名皮肤"
-            )
+            logger.info(f"检测到 {character} 的旧版皮肤目录，正在从 PRTS 迁移具名皮肤")
             success, message = await self.fetch_character_voices(
                 character,
                 True,
@@ -1582,9 +1528,7 @@ class VoiceManager:
             )
 
             if not success:
-                logger.warning(
-                    f"{character} 旧版皮肤迁移暂缓，已保留原文件: {message}"
-                )
+                logger.warning(f"{character} 旧版皮肤迁移暂缓，已保留原文件: {message}")
                 continue
 
             self.scan_voice_files()
@@ -1597,11 +1541,7 @@ class VoiceManager:
                     for languages in packages.values()
                     if languages.get(language)
                 ]
-                skin_voices = (
-                    set().union(*new_voice_sets)
-                    if new_voice_sets
-                    else set()
-                )
+                skin_voices = set().union(*new_voice_sets) if new_voice_sets else set()
                 missing_voices = [
                     voice for voice in old_voices if voice not in skin_voices
                 ]
@@ -1691,9 +1631,8 @@ class VoiceManager:
                     )
 
                     for language_label, voice_key in (character_map or {}).items():
-                        if (
-                            language_label == "语音key"
-                            or not self._is_skin_label(language_label)
+                        if language_label == "语音key" or not self._is_skin_label(
+                            language_label
                         ):
                             continue
 
@@ -1710,8 +1649,7 @@ class VoiceManager:
                     asyncio.TimeoutError,
                 ) as exc:
                     logger.warning(
-                        f"{character} 的皮肤稳定索引暂未补齐，"
-                        f"将在下次启动重试: {exc}"
+                        f"{character} 的皮肤稳定索引暂未补齐，将在下次启动重试: {exc}"
                     )
 
         self.scan_voice_files()
@@ -1722,8 +1660,7 @@ class VoiceManager:
                 for resource_id in self.skin_voice_index.get(character, {})
             ):
                 logger.warning(
-                    f"{character} 仍有无法与 PRTS 对应的本地皮肤目录，"
-                    "已保留离线索引"
+                    f"{character} 仍有无法与 PRTS 对应的本地皮肤目录，已保留离线索引"
                 )
 
     async def _download_single_voice(
@@ -2013,9 +1950,7 @@ class VoiceManager:
 
                 except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                     if attempt + 1 >= self.CHARACTER_PAGE_RETRIES:
-                        raise PRTSLookupError(
-                            f"访问 PRTS 时网络异常: {exc}"
-                        ) from exc
+                        raise PRTSLookupError(f"访问 PRTS 时网络异常: {exc}") from exc
 
                 await asyncio.sleep(0.4 * (2**attempt))
 
@@ -2032,9 +1967,7 @@ class VoiceManager:
             )
 
             if not voice_div:
-                raise PRTSLookupError(
-                    "PRTS 页面结构可能已变化：未找到语音记录节点"
-                )
+                raise PRTSLookupError("PRTS 页面结构可能已变化：未找到语音记录节点")
 
             voice_data = str(
                 voice_div.get(
@@ -2061,9 +1994,7 @@ class VoiceManager:
                     result[language] = path
 
             if not result:
-                raise PRTSLookupError(
-                    "PRTS 页面结构可能已变化：语音记录内容为空"
-                )
+                raise PRTSLookupError("PRTS 页面结构可能已变化：语音记录内容为空")
 
             return result
 

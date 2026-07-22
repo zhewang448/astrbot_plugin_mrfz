@@ -4,13 +4,13 @@ import json
 import random
 import time
 from pathlib import Path
-from typing import Optional, Dict, Tuple
+from typing import Dict, Optional, Tuple
 from uuid import uuid4
 
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.all import *
-from astrbot.api.event import filter, AstrMessageEvent, MessageChain
-from astrbot.api.star import StarTools
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.message_components import Image, Plain, Record
+from astrbot.api.star import Context, Star, StarTools, register
 
 # 引入拆分后的模块
 from .data_source import VoiceManager
@@ -252,11 +252,7 @@ class MyPlugin(Star):
             if len(options) > 1
             else f"未找到指定的 {base} 皮肤，当前可用项如下"
         )
-        return (
-            f"{reason}：\n"
-            f"{option_lines}\n"
-            f"例如：/mrfz {options[0]} 问候 中文"
-        )
+        return f"{reason}：\n{option_lines}\n例如：/mrfz {options[0]} 问候 中文"
 
     @staticmethod
     def _valid_trigger(trigger: object) -> bool:
@@ -381,9 +377,7 @@ class MyPlugin(Star):
 
             item = {
                 "name": (
-                    f"{base}皮肤 · {skin_id}"
-                    if is_skin and skin_id
-                    else character
+                    f"{base}皮肤 · {skin_id}" if is_skin and skin_id else character
                 ),
                 "avatar_path": str(self.voice_mgr.assets_dir / f"{base}.png"),
                 "languages": lang_items,
@@ -520,8 +514,8 @@ class MyPlugin(Star):
             yield event.plain_result("角色名称不合法")
             return
 
-        resolved_character, skin_options = (
-            self.voice_mgr.resolve_character_reference(character)
+        resolved_character, skin_options = self.voice_mgr.resolve_character_reference(
+            character
         )
 
         if skin_options and not resolved_character:
@@ -756,8 +750,8 @@ class MyPlugin(Star):
 
         await self._scan_if_needed()
 
-        resolved_character, skin_options = (
-            self.voice_mgr.resolve_character_reference(character)
+        resolved_character, skin_options = self.voice_mgr.resolve_character_reference(
+            character
         )
 
         if skin_options and not resolved_character:
