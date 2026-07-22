@@ -86,7 +86,9 @@ class MyPlugin(Star):
                     if (
                         not self.voice_mgr.validate_character(character)
                         or voice not in self.voice_mgr.VOICE_DESCRIPTIONS
-                        or (lang is not None and lang not in self.voice_mgr.LANGUAGE_MAP)
+                        or (
+                            lang is not None and lang not in self.voice_mgr.LANGUAGE_MAP
+                        )
                     ):
                         logger.warning(f"忽略字段无效的自定义指令: {trigger!r}")
                         continue
@@ -274,7 +276,10 @@ class MyPlugin(Star):
             if (
                 not self.voice_mgr.validate_character(char)
                 or voice not in self.voice_mgr.VOICE_DESCRIPTIONS
-                or (lang_code is not None and lang_code not in self.voice_mgr.LANGUAGE_MAP)
+                or (
+                    lang_code is not None
+                    and lang_code not in self.voice_mgr.LANGUAGE_MAP
+                )
             ):
                 logger.warning(f"忽略字段无效的自定义指令: {msg!r}")
                 return
@@ -364,7 +369,9 @@ class MyPlugin(Star):
                         return
                     await self._scan_if_needed(force=True)
                     if character not in self.voice_mgr.voice_index:
-                        yield event.plain_result("下载完成，但没有发现可播放的语音文件。")
+                        yield event.plain_result(
+                            "下载完成，但没有发现可播放的语音文件。"
+                        )
                         return
                 else:
                     yield event.plain_result(f"未找到角色 {character} (自动下载已关闭)")
@@ -379,7 +386,9 @@ class MyPlugin(Star):
                 yield event.plain_result(f"不支持的语言参数: {lang}")
                 return
         else:
-            target_lang = self.voice_mgr.choose_language(character, self.default_lang_rank)
+            target_lang = self.voice_mgr.choose_language(
+                character, self.default_lang_rank
+            )
 
         if target_lang == "nodownload":
             yield event.plain_result("该角色没有符合当前语言配置的语音文件。")
@@ -584,7 +593,7 @@ class MyPlugin(Star):
             render_data = await self._get_list_render_data()
             # 两张图均在线程中渲染，且输出唯一文件名，避免并发覆盖。
             help_img_path, list_img_path = await asyncio.gather(
-                asyncio.to_thread(self.renderer.render_help),
+                self.renderer.render_help(),
                 asyncio.to_thread(
                     self.renderer.render_image,
                     render_data,
