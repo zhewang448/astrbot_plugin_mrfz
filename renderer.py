@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
 
 class VoiceRenderer:
@@ -180,20 +180,40 @@ class VoiceRenderer:
     def _draw_hazard(self, draw, x: int, y: int, width: int, height: int) -> None:
         draw.rectangle((x, y, x + width, y + height), fill=self.COLOR_YELLOW)
         stripe = 18
-        for start in range(x - height, x + width + height, stripe * 2):
-            draw.polygon(
-                [
-                    (start, y + height),
-                    (start + height, y),
-                    (start + height + stripe, y),
-                    (start + stripe, y + height),
-                ],
-                fill=self.COLOR_BLACK,
-            )
+        # Draw the diagonal bands scanline by scanline so they are clipped to
+        # the yellow lane.  Directly drawing the parallelograms lets their
+        # corners escape the box and produces the black wedges previously seen
+        # at the top-right edge of the canvas.
+        starts = range(x - height - stripe, x + width + stripe, stripe * 2)
+        for row in range(height + 1):
+            row_y = y + row
+            diagonal_offset = height - row
+            for start in starts:
+                band_left = max(x, start + diagonal_offset)
+                band_right = min(x + width, start + diagonal_offset + stripe)
+                if band_left <= band_right:
+                    draw.line(
+                        (band_left, row_y, band_right, row_y),
+                        fill=self.COLOR_BLACK,
+                        width=1,
+                    )
 
     def _draw_header(self, draw, width: int, *, page_code: str, title: str) -> int:
         left = self.PAGE_MARGIN
         right = width - self.PAGE_MARGIN
+
+        # Keep the warning stripe in its own lane.  It is deliberately drawn
+        # first so it can never cover the archive title or status text.
+        hazard_width = 28
+        hazard_x = right - hazard_width
+        meta_right = hazard_x - 18
+        meta_left = meta_right - 225
+        self._draw_hazard(draw, hazard_x, 42, hazard_width, 83)
+        draw.line(
+            (hazard_x - 9, 42, hazard_x - 9, 125),
+            fill=self.COLOR_LINE,
+            width=1,
+        )
 
         draw.text(
             (left, 42),
@@ -208,28 +228,34 @@ class VoiceRenderer:
             fill=self.COLOR_TEXT,
         )
         draw.rectangle((left, 119, left + 192, 125), fill=self.COLOR_YELLOW)
-        draw.rectangle((left + 198, 119, right - 245, 125), fill=self.COLOR_TEXT)
+        draw.rectangle((left + 198, 119, meta_left - 20, 125), fill=self.COLOR_TEXT)
 
-        meta_x = right - 225
+        meta_font = self._load_font(14, mono=True)
+        meta_text = f"FILE / {page_code}"
         draw.text(
-            (meta_x, 42),
-            f"FILE / {page_code}",
-            font=self._load_font(14, mono=True),
+            (meta_right - draw.textlength(meta_text, font=meta_font), 42),
+            meta_text,
+            font=meta_font,
             fill=self.COLOR_YELLOW,
         )
+
+        archive_font = self._load_font(22, bold=True)
+        archive_text = "VOICE ARCHIVE"
         draw.text(
-            (meta_x, 66),
-            "VOICE ARCHIVE",
-            font=self._load_font(22, bold=True),
+            (meta_right - draw.textlength(archive_text, font=archive_font), 66),
+            archive_text,
+            font=archive_font,
             fill=self.COLOR_TEXT,
         )
+
+        status_font = self._load_font(13, mono=True)
+        status_text = "STATUS  ONLINE  ●"
         draw.text(
-            (meta_x, 95),
-            "STATUS  ONLINE  ●",
-            font=self._load_font(13, mono=True),
+            (meta_right - draw.textlength(status_text, font=status_font), 95),
+            status_text,
+            font=status_font,
             fill=self.COLOR_CYAN,
         )
-        self._draw_hazard(draw, right - 36, 42, 36, 83)
 
         draw.text(
             (left, 139),
@@ -292,17 +318,29 @@ class VoiceRenderer:
         if avatar_path and Path(avatar_path).is_file():
             try:
                 with Image.open(avatar_path) as source:
-                    avatar = source.convert("RGB")
+                    # Some PRTS portraits are palette/RGBA PNGs.  Converting
+                    # them straight to RGB replaces transparent pixels with
+                    # opaque colour blocks, so preserve alpha throughout the
+                    # crop and resize pipeline.
+                    avatar = ImageOps.exif_transpose(source).convert("RGBA")
                     side = min(avatar.size)
                     left = (avatar.width - side) // 2
                     top = (avatar.height - side) // 2
                     avatar = avatar.crop((left, top, left + side, top + side))
-                    avatar = avatar.resize((size, size), Image.Resampling.LANCZOS)
-                    return ImageEnhance.Contrast(avatar).enhance(1.08)
+                    # Resize premultiplied RGBA to avoid dark/coloured fringes
+                    # leaking from fully transparent source pixels.
+                    avatar = (
+                        avatar.convert("RGBa")
+                        .resize((size, size), Image.Resampling.LANCZOS)
+                        .convert("RGBA")
+                    )
+                    rgb = ImageEnhance.Contrast(avatar.convert("RGB")).enhance(1.08)
+                    rgb.putalpha(avatar.getchannel("A"))
+                    return rgb
             except (OSError, IOError, ValueError):
                 pass
 
-        placeholder = Image.new("RGB", (size, size), self.COLOR_BLACK)
+        placeholder = Image.new("RGBA", (size, size), self.COLOR_BLACK + (255,))
         pdraw = ImageDraw.Draw(placeholder)
         pdraw.line((0, 0, size, size), fill=self.COLOR_LINE, width=2)
         pdraw.line((size, 0, 0, size), fill=self.COLOR_LINE, width=2)
@@ -327,7 +365,10 @@ class VoiceRenderer:
             ],
             fill=255,
         )
-        avatar.putalpha(mask)
+        # Preserve transparent regions from the source portrait while also
+        # applying the terminal-style cut-corner mask.  putalpha(mask) alone
+        # would make every source pixel inside the polygon opaque again.
+        avatar.putalpha(ImageChops.multiply(avatar.getchannel("A"), mask))
         image.alpha_composite(avatar, (x, y))
 
     def _draw_language_tags(self, draw, x: int, y: int, languages: List[Dict]) -> None:
