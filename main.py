@@ -1,17 +1,16 @@
-import json
-import random
 import asyncio
 import difflib
+import json
+import random
 import time
 from pathlib import Path
 from typing import Optional, Dict, Tuple
 from uuid import uuid4
 
+from astrbot.api import AstrBotConfig, logger
 from astrbot.api.all import *
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
-from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.api.star import StarTools
-from astrbot.api import logger
 
 # 引入拆分后的模块
 from .data_source import VoiceManager
@@ -27,7 +26,7 @@ SCAN_CACHE_DURATION = 60
     "astrbot_plugin_mrfz",
     "bushikq",
     "明日方舟角色语音插件",
-    "3.5.0",
+    "3.5.1",
 )
 class MyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -48,6 +47,10 @@ class MyPlugin(Star):
 
         # 3. 加载普通配置
         self.auto_download = self.config.get("auto_download", True)
+        self.allow_public_auto_download = self.config.get(
+            "allow_public_auto_download",
+            True,
+        )
         self.auto_download_skin = self.config.get(
             "auto_download_skin",
             True,
@@ -70,7 +73,7 @@ class MyPlugin(Star):
         self._cooldowns: Dict[Tuple[str, str], float] = {}
 
         # 6. 启动后台资源检查
-        asyncio.create_task(self.voice_mgr.ensure_assets())
+        self._asset_task = asyncio.create_task(self.voice_mgr.ensure_assets())
 
     # ================== 持久化存储逻辑 ==================
 
@@ -275,8 +278,25 @@ class MyPlugin(Star):
 
         # 填充干员及皮肤数据
         for character, languages in self.voice_mgr.voice_index.items():
-            is_skin = character.endswith("皮肤")
-            base = self.voice_mgr._base_character(character)
+            parsed = self.voice_mgr._parse_character_reference(character)
+
+            if not parsed:
+                logger.warning(f"忽略无法解析的语音索引项: {character!r}")
+                continue
+
+            base, is_skin, skin_id = parsed
+
+            # 新目录会同时生成“角色皮肤”聚合索引和每个具体皮肤索引。
+            # 列表只展示具体皮肤；旧版无皮肤 ID 的目录仍保留聚合项。
+            if is_skin and skin_id is None:
+                packages = self.voice_mgr.skin_voice_index.get(base, {})
+                legacy_languages = packages.get("legacy")
+
+                if not legacy_languages:
+                    continue
+
+                languages = list(legacy_languages)
+
             lang_items = []
 
             for lang_code in languages:
@@ -428,6 +448,13 @@ class MyPlugin(Star):
             if not guessed_character:
                 if not self.auto_download:
                     yield event.plain_result(f"未找到角色 {character} (自动下载已关闭)")
+                    return
+
+                if not self.allow_public_auto_download and not event.is_admin():
+                    yield event.plain_result(
+                        f"未找到角色 {character} "
+                        "（普通用户自动下载已关闭，请联系管理员下载）"
+                    )
                     return
 
                 yield event.plain_result(f"未找到 {character}，正在尝试从 PRTS 获取...")
@@ -753,3 +780,17 @@ class MyPlugin(Star):
                 exc_info=True,
             )
             yield event.plain_result(f"帮助生成失败: {exc}")
+
+    async def terminate(self):
+        """插件停用或重载时停止后台头像检查任务。"""
+        task = getattr(self, "_asset_task", None)
+
+        if task is None or task.done():
+            return
+
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass

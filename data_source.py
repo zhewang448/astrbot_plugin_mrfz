@@ -4,6 +4,7 @@ import json
 import os
 import re
 import tempfile
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import quote, urljoin, urlparse
@@ -11,6 +12,11 @@ from urllib.parse import quote, urljoin, urlparse
 import aiohttp
 from astrbot.api import logger
 from bs4 import BeautifulSoup
+from PIL import Image as PILImage
+
+
+class PRTSLookupError(Exception):
+    """PRTS 角色页请求或解析失败，并携带可直接展示的原因。"""
 
 
 class VoiceManager:
@@ -141,6 +147,8 @@ class VoiceManager:
     MAX_VOICE_BYTES = 20 * 1024 * 1024
     MAX_IMAGE_BYTES = 10 * 1024 * 1024
     DOWNLOAD_RETRIES = 3
+    CHARACTER_PAGE_RETRIES = 3
+    RETRYABLE_PAGE_STATUSES = {429, 500, 502, 503, 504}
 
     _SAFE_COMPONENT_RE = re.compile(
         r"^[\w\- .·()（）]+$",
@@ -314,7 +322,7 @@ class VoiceManager:
                         path.is_file()
                         and path.suffix.lower() == ".wav"
                         and path.stem in allowed
-                        and path.stat().st_size > 0
+                        and self._is_valid_wav_file(path)
                         and self._path_is_within(
                             path,
                             directory,
@@ -332,6 +340,52 @@ class VoiceManager:
             set(found),
             key=lambda name: order[name],
         )
+
+    @classmethod
+    def _is_valid_wav_file(cls, path: Path) -> bool:
+        """以最小 RIFF/WAVE 头校验兼容现有合法 WAV。"""
+        try:
+            if not path.is_file() or path.stat().st_size < 12:
+                return False
+
+            with path.open("rb") as handle:
+                return cls._looks_like_wav(handle.read(12))
+        except OSError:
+            return False
+
+    @staticmethod
+    def _is_valid_png_file(path: Path) -> bool:
+        try:
+            if not path.is_file() or path.stat().st_size == 0:
+                return False
+
+            with PILImage.open(path) as image:
+                image.verify()
+                return image.format == "PNG"
+        except (OSError, ValueError):
+            return False
+
+    def _quarantine_invalid_wav(self, path: Path) -> Optional[Path]:
+        """把损坏的旧 WAV 移出语音树，保留原文件供排查。"""
+        try:
+            relative = path.relative_to(self.voices_dir)
+            target = self.data_dir / "quarantine" / "voices" / relative
+            target = target.with_name(f"{target.name}.invalid")
+            target.parent.mkdir(parents=True, exist_ok=True)
+
+            candidate = target
+            suffix = 1
+
+            while candidate.exists():
+                candidate = target.with_name(f"{target.name}.{suffix}")
+                suffix += 1
+
+            path.replace(candidate)
+            logger.warning(f"已隔离损坏的语音文件: {path} -> {candidate}")
+            return candidate
+        except (OSError, ValueError) as exc:
+            logger.warning(f"隔离损坏语音文件失败 {path}: {exc}")
+            return None
 
     def _record_flat_character(
         self,
@@ -849,7 +903,7 @@ class VoiceManager:
                     if not character_map:
                         return (
                             False,
-                            (f"未在PRTS Wiki找到角色 {base_character} 的语音记录"),
+                            (f"PRTS 返回了角色 {base_character} 的空语音记录"),
                         )
 
                     base_url = "https://torappu.prts.wiki/assets/audio"
@@ -951,6 +1005,9 @@ class VoiceManager:
                     if not image_ok:
                         logger.debug(f"获取头像跳过 {base_character}: {image_message}")
 
+            except PRTSLookupError as exc:
+                logger.warning(f"获取 {base_character} 的 PRTS 记录失败: {exc}")
+                return False, str(exc)
             except (
                 aiohttp.ClientError,
                 asyncio.TimeoutError,
@@ -1063,11 +1120,18 @@ class VoiceManager:
                 exist_ok=True,
             )
 
-            if path.is_file() and path.stat().st_size > 0:
-                return (
-                    "existed",
-                    "文件已存在",
-                )
+            if path.is_file():
+                if self._is_valid_wav_file(path):
+                    return (
+                        "existed",
+                        "文件已存在",
+                    )
+
+                if self._quarantine_invalid_wav(path) is None:
+                    return (
+                        "failed",
+                        "现有 WAV 已损坏且无法隔离",
+                    )
         except OSError as exc:
             return (
                 "failed",
@@ -1211,12 +1275,50 @@ class VoiceManager:
 
         try:
             assert session is not None
+            html = None
 
-            async with session.get(url) as response:
-                if response.status != 200:
-                    return None
+            for attempt in range(self.CHARACTER_PAGE_RETRIES):
+                try:
+                    async with session.get(url) as response:
+                        status = response.status
 
-                html = await response.text()
+                        if status == 200:
+                            html = await response.text()
+                            break
+
+                        if status == 404:
+                            raise PRTSLookupError(
+                                f"PRTS 未找到角色 {base_character} 的语音记录（HTTP 404）"
+                            )
+
+                        if status == 403:
+                            raise PRTSLookupError(
+                                "PRTS 拒绝访问（HTTP 403），请稍后重试或检查网络出口"
+                            )
+
+                        if status not in self.RETRYABLE_PAGE_STATUSES:
+                            raise PRTSLookupError(f"PRTS 请求失败（HTTP {status}）")
+
+                        if attempt + 1 >= self.CHARACTER_PAGE_RETRIES:
+                            if status == 429:
+                                raise PRTSLookupError(
+                                    "PRTS 请求过于频繁（HTTP 429），请稍后重试"
+                                )
+
+                            raise PRTSLookupError(
+                                f"PRTS 服务暂时异常（HTTP {status}），请稍后重试"
+                            )
+
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    if attempt + 1 >= self.CHARACTER_PAGE_RETRIES:
+                        raise PRTSLookupError(
+                            f"访问 PRTS 时网络异常: {exc}"
+                        ) from exc
+
+                await asyncio.sleep(0.4 * (2**attempt))
+
+            if html is None:
+                raise PRTSLookupError("PRTS 页面请求未返回内容")
 
             soup = BeautifulSoup(
                 html,
@@ -1228,7 +1330,9 @@ class VoiceManager:
             )
 
             if not voice_div:
-                return None
+                raise PRTSLookupError(
+                    "PRTS 页面结构可能已变化：未找到语音记录节点"
+                )
 
             voice_data = str(
                 voice_div.get(
@@ -1254,17 +1358,18 @@ class VoiceManager:
                 if language and path:
                     result[language] = path
 
-            return result or None
+            if not result:
+                raise PRTSLookupError(
+                    "PRTS 页面结构可能已变化：语音记录内容为空"
+                )
 
-        except (
-            aiohttp.ClientError,
-            asyncio.TimeoutError,
-        ) as exc:
-            logger.error(f"获取角色ID映射失败 {base_character}: {exc}")
-            return None
+            return result
+
+        except PRTSLookupError:
+            raise
         except Exception as exc:
-            logger.error(f"解析Wiki失败: {exc}")
-            return None
+            logger.error(f"解析 PRTS 页面失败: {exc}")
+            raise PRTSLookupError(f"解析 PRTS 页面失败: {exc}") from exc
         finally:
             if owns_session and session is not None:
                 await session.close()
@@ -1282,7 +1387,7 @@ class VoiceManager:
                 base_character = parsed[0]
                 avatar_path = self.assets_dir / f"{base_character}.png"
 
-                if not avatar_path.is_file():
+                if not self._is_valid_png_file(avatar_path):
                     missing.add(base_character)
 
             if not missing:
@@ -1421,9 +1526,13 @@ class VoiceManager:
                             "头像文件过大",
                         )
 
-            png_header = b"\x89PNG\r\n\x1a\n"
+            try:
+                with PILImage.open(BytesIO(image_data)) as image:
+                    image.verify()
 
-            if not bytes(image_data).startswith(png_header):
+                    if image.format != "PNG":
+                        raise ValueError("图片格式不是 PNG")
+            except (OSError, ValueError):
                 return (
                     False,
                     "响应内容不是有效 PNG",

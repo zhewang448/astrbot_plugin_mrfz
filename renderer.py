@@ -1,6 +1,7 @@
 import asyncio
 import math
 import tempfile
+import threading
 import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -38,6 +39,10 @@ class VoiceRenderer:
             output_dir or Path(tempfile.gettempdir()) / "astrbot_plugin_mrfz"
         )
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._output_locks = {
+            "help": threading.Lock(),
+            "list": threading.Lock(),
+        }
 
     def _font_candidates(self, *, bold: bool, mono: bool) -> Sequence[Path]:
         base = Path(__file__).parent
@@ -105,7 +110,19 @@ class VoiceRenderer:
         return Image.new("RGBA", size, color)
 
     def _new_output_path(self, prefix: str) -> Path:
-        return self.output_dir / f"{prefix}_{uuid.uuid4().hex}.png"
+        if prefix not in self._output_locks:
+            raise ValueError(f"不支持的渲染输出类型: {prefix}")
+
+        return self.output_dir / f"{prefix}.png"
+
+    def _save_output(self, image: Image.Image, prefix: str) -> Path:
+        """同类图片串行原子覆盖，始终只保留一个最终文件。"""
+        path = self._new_output_path(prefix)
+
+        with self._output_locks[prefix]:
+            self._save_atomic(image, path)
+
+        return path
 
     @staticmethod
     def _save_atomic(image: Image.Image, path: Path) -> None:
@@ -539,13 +556,21 @@ class VoiceRenderer:
                 "/mrfz 凯尔希 问候 中文",
             ),
             ("/mrfz_list", "查看本地已登记干员、时装和语言索引", "/mrfz_list"),
-            ("/mrfz_fetch [角色名]", "从 PRTS Wiki 获取干员语音资料", "/mrfz_fetch 陈"),
+            (
+                "/mrfz_fetch [角色名]",
+                "[管理员] 从 PRTS Wiki 获取干员语音资料",
+                "/mrfz_fetch 陈",
+            ),
             (
                 "/mrfz_bind [触发] [角色] [语音] [语言]",
-                "建立一条自定义快捷触发指令",
+                "[管理员] 建立一条自定义快捷触发指令",
                 "/mrfz_bind 早安 阿米娅 问候 中文",
             ),
-            ("/mrfz_unbind [触发词]", "移除已经登记的快捷触发词", "/mrfz_unbind 早安"),
+            (
+                "/mrfz_unbind [触发词]",
+                "[管理员] 移除已经登记的快捷触发词",
+                "/mrfz_unbind 早安",
+            ),
         ]
         row_height = 118
         start_y = 190
@@ -600,8 +625,7 @@ class VoiceRenderer:
             y += row_height + 14
 
         self._draw_footer(draw, width, total_height)
-        output_path = self._new_output_path("help")
-        self._save_atomic(image.convert("RGB"), output_path)
+        output_path = self._save_output(image.convert("RGB"), "help")
         return str(output_path.absolute())
 
     def render_image(self, data: Dict, voice_descriptions: List[str]) -> str:
@@ -730,8 +754,7 @@ class VoiceRenderer:
             draw.text((x + 54, y + 12), fitted, font=text_font, fill=self.COLOR_TEXT)
 
         self._draw_footer(draw, self.CANVAS_WIDTH, total_height)
-        output_path = self._new_output_path("list")
-        self._save_atomic(image.convert("RGB"), output_path)
+        output_path = self._save_output(image.convert("RGB"), "list")
         return str(output_path.absolute())
 
     def _draw_footer(self, draw, width: int, height: int) -> None:

@@ -2,13 +2,19 @@
   "auto_download": {
       "description": "是否自动下载未找到的角色语音",
       "type": "bool",
-      "hint": "true/false",
+      "hint": "关闭后，管理员和普通用户都只能播放本地已有语音",
+      "default": true
+  },
+  "allow_public_auto_download": {
+      "description": "是否允许普通用户触发自动下载",
+      "type": "bool",
+      "hint": "关闭后，普通用户遇到未缓存角色时需要联系管理员；管理员仍可自动下载",
       "default": true
   },
   "auto_download_skin": {
       "description": "是否自动下载角色的皮肤语音",
       "type": "bool",
-      "hint": "true/false",
+      "hint": "开启后会同时获取角色的皮肤语音",
       "default": true
   },
   "default_language_rank": {
