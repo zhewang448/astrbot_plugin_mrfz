@@ -27,7 +27,7 @@ SCAN_CACHE_DURATION = 60
     "astrbot_plugin_mrfz",
     "bushikq",
     "明日方舟角色语音插件",
-    "3.7.0",
+    "3.7.1",
 )
 class MyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):

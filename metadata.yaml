@@ -2,7 +2,7 @@ name: astrbot_plugin_mrfz
 display_name: 明日方舟角色语音
 desc: 这是一个用于获取和播放明日方舟所有角色语音的 AstrBot 插件。
 short_desc: 自动获取并播放明日方舟干员及皮肤的多语言语音。
-version: v3.7.0
+version: v3.7.1
 astrbot_version: ">=4.26,<5"
 author: bushikq
 repo: https://github.com/zhewang448/astrbot_plugin_mrfz
