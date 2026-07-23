@@ -15,6 +15,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 # 引入拆分后的模块
 from .data_source import VoiceManager
 from .renderer import VoiceRenderer
+from .voice_page import VoicePageManager
 
 
 # 常量定义
@@ -26,7 +27,7 @@ SCAN_CACHE_DURATION = 60
     "astrbot_plugin_mrfz",
     "bushikq",
     "明日方舟角色语音插件",
-    "3.6.0",
+    "3.7.0",
 )
 class MyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -74,6 +75,19 @@ class MyPlugin(Star):
 
         # 6. 启动后台迁移与资源检查
         self._startup_task = asyncio.create_task(self._initialize_resources())
+
+        # 7. 注册 AstrBot Plugin Page 管理端
+        self.voice_page = VoicePageManager(
+            context=context,
+            voice_mgr=self.voice_mgr,
+            custom_mappings=self.custom_mappings,
+            save_custom_commands=self._save_custom_commands,
+            scan_callback=self._scan_if_needed,
+            valid_trigger=self._valid_trigger,
+            default_language_rank=self.default_lang_rank,
+            default_download_langs=self.download_langs,
+            default_download_skin=self.auto_download_skin,
+        )
 
     # ================== 持久化存储逻辑 ==================
 
@@ -963,6 +977,11 @@ class MyPlugin(Star):
 
     async def terminate(self):
         """插件停用或重载时停止后台迁移与资源检查任务。"""
+        voice_page = getattr(self, "voice_page", None)
+
+        if voice_page is not None:
+            await voice_page.terminate()
+
         task = getattr(self, "_startup_task", None)
 
         if task is None or task.done():

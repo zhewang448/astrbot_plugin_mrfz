@@ -1,0 +1,8 @@
+{
+  "pages": {
+    "voice-manager": {
+      "title": "Voice Archive Console",
+      "description": "Manage operator and outfit voices, downloads, integrity checks, bindings, and recoverable files."
+    }
+  }
+}
