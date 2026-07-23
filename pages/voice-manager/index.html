@@ -325,6 +325,12 @@
         <div class="drawer-toolbar">
           <select id="drawer-language" aria-label="选择语言"></select>
           <button class="button button-secondary" id="drawer-export">导出当前语言</button>
+          <button class="button button-secondary" id="drawer-select-all">
+            全选本包
+          </button>
+          <button class="button button-warning" id="drawer-batch-remove" disabled>
+            批量回收 <span id="drawer-selected-count">0</span>
+          </button>
           <label class="button button-secondary file-button">
             批量导入 ZIP
             <input id="drawer-import" type="file" accept=".zip,application/zip" />

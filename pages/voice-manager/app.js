@@ -187,6 +187,7 @@ function auditActionLabel(action) {
     replace_voice: "替换语音",
     import_archive: "批量导入",
     trash_voice: "移入回收站",
+    trash_batch: "批量移入回收站",
     restore_voice: "恢复语音",
     purge_voice: "永久删除",
     export_voice: "导出语音",
@@ -336,11 +337,18 @@ function renderArchiveDetail(data) {
     .join("");
   $("#drawer-export").disabled = !data.language;
   $("#drawer-import").disabled = !data.importToken;
+  $("#drawer-selected-count").textContent = "0";
+  $("#drawer-batch-remove").disabled = true;
+  $("#drawer-select-all").textContent = "全选本包";
   $("#drawer-voice-list").innerHTML = (data.voices || [])
     .map(
       (item) => `
         <article class="voice-row" data-voice="${escapeHtml(item.voice)}"
           data-token="${escapeHtml(item.replaceToken)}">
+          <label class="voice-select" title="${item.deletable ? "选择此语音" : "此条目不能从当前档案回收"}">
+            <input type="checkbox" data-voice-select
+              ${item.deletable ? "" : "disabled"} aria-label="选择${escapeHtml(item.voice)}" />
+          </label>
           <i class="voice-status-dot ${escapeHtml(item.status)}"></i>
           <h4>${escapeHtml(item.voice)}</h4>
           <span class="voice-source">${escapeHtml(item.source)}</span>
@@ -350,6 +358,23 @@ function renderArchiveDetail(data) {
       `,
     )
     .join("");
+}
+
+function selectedArchiveVoices() {
+  return $$("[data-voice-select]:checked", $("#drawer-voice-list")).map(
+    (input) => input.closest(".voice-row").dataset.voice,
+  );
+}
+
+function updateArchiveSelection() {
+  const selectable = $$("[data-voice-select]:not(:disabled)", $("#drawer-voice-list"));
+  const selected = selectedArchiveVoices();
+  $("#drawer-selected-count").textContent = String(selected.length);
+  $("#drawer-batch-remove").disabled = selected.length === 0;
+  $("#drawer-select-all").textContent =
+    selectable.length > 0 && selected.length === selectable.length
+      ? "取消全选"
+      : "全选本包";
 }
 
 async function openArchive(character, language = "") {
@@ -429,18 +454,71 @@ async function exportCurrentArchive() {
   );
 }
 
-function modalConfirm({ eyebrow = "CONFIRM ACTION", title, message, danger = false }) {
+function previewMetrics(items) {
+  return `
+    <div class="preview-metrics">
+      ${items
+        .map(
+          (item) => `
+            <div class="${item.tone ? `is-${escapeHtml(item.tone)}` : ""}">
+              <strong>${escapeHtml(item.value)}</strong>
+              <span>${escapeHtml(item.label)}</span>
+              ${item.note ? `<small>${escapeHtml(item.note)}</small>` : ""}
+            </div>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function previewWarnings(items = []) {
+  if (!items.length) return "";
+  return `
+    <div class="preview-warnings">
+      ${items.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}
+    </div>
+  `;
+}
+
+function previewSample(items = []) {
+  if (!items.length) return "";
+  return `
+    <details class="preview-sample">
+      <summary>查看部分条目</summary>
+      <div>${items.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>
+    </details>
+  `;
+}
+
+async function discardOperationPreview(previewToken) {
+  if (!previewToken) return;
+  await bridge
+    .apiPost("page/preview/discard", { previewToken })
+    .catch(() => {});
+}
+
+function modalConfirm({
+  eyebrow = "CONFIRM ACTION",
+  title,
+  message,
+  danger = false,
+  fields = "",
+  confirmLabel = "确认",
+}) {
   const modal = $("#modal");
   $("#modal-eyebrow").textContent = eyebrow;
   $("#modal-title").textContent = title;
   $("#modal-message").textContent = message;
-  $("#modal-fields").innerHTML = "";
+  $("#modal-fields").innerHTML = fields;
   $("#modal-confirm").className = `button ${danger ? "button-warning" : "button-primary"}`;
+  $("#modal-confirm").textContent = confirmLabel;
   modal.returnValue = "";
   modal.showModal();
   return new Promise((resolve) => {
     const onClose = () => {
       modal.removeEventListener("close", onClose);
+      $("#modal-confirm").textContent = "确认";
       resolve(modal.returnValue === "confirm");
     };
     modal.addEventListener("close", onClose);
@@ -468,6 +546,51 @@ async function removeVoice(voice) {
   );
   await openArchive(detail.character, detail.language);
   await loadArchives();
+}
+
+async function batchRemoveVoices() {
+  const detail = state.archiveDetail;
+  const voices = selectedArchiveVoices();
+  if (!detail || !voices.length) return;
+  const preview = await run(() =>
+    bridge.apiPost("page/remove/batch/preview", {
+      character: detail.character,
+      language: detail.language,
+      voices,
+    }),
+  );
+  const confirmed = await modalConfirm({
+    eyebrow: "BATCH RECYCLE PREVIEW",
+    title: preview.title || "批量回收预览",
+    message: "以下结果来自当前文件状态。确认后才会执行，预览后发生变化会被安全拦截。",
+    danger: true,
+    confirmLabel: `回收 ${preview.affected} 个文件`,
+    fields: [
+      previewMetrics([
+        { label: "已选择", value: preview.selected },
+        { label: "将回收", value: preview.affected, tone: "danger" },
+        { label: "状态变化", value: preview.unavailable || 0 },
+        { label: "文件体积", value: formatBytes(preview.bytes) },
+      ]),
+      previewWarnings(preview.warnings),
+      previewSample(preview.sample),
+    ].join(""),
+  });
+  if (!confirmed) {
+    await discardOperationPreview(preview.previewToken);
+    return;
+  }
+  const result = await run(
+    () =>
+      bridge.apiPost("page/remove/batch", {
+        previewToken: preview.previewToken,
+      }),
+    { success: `${preview.affected} 个语音已移入回收站` },
+  );
+  if (!result?.removed) return;
+  await openArchive(detail.character, detail.language);
+  await loadArchives();
+  await loadOverview();
 }
 
 async function reloadArchiveDetail() {
@@ -533,12 +656,37 @@ async function submitFetch(event) {
     toast("请至少选择一种语言", "error");
     return;
   }
+  const requestPayload = {
+    character,
+    languages,
+    includeSkin: $("#fetch-skin").checked,
+  };
+  const preview = await run(() =>
+    bridge.apiPost("page/fetch/preview", requestPayload),
+  );
+  const confirmed = await modalConfirm({
+    eyebrow: "PRTS TASK PREVIEW",
+    title: preview.title || `获取 ${character} 的语音资源`,
+    message: `语言：${(preview.languageNames || []).join("、")}。确认后才会创建后台任务。`,
+    confirmLabel: "创建后台任务",
+    fields: [
+      previewMetrics([
+        { label: "已存在/跳过", value: preview.existing },
+        { label: "待补全", value: preview.missing },
+        { label: "损坏重取", value: preview.damaged, tone: preview.damaged ? "danger" : "" },
+        { label: "编号修复覆盖", value: preview.overwritten, tone: preview.overwritten ? "warning" : "" },
+      ]),
+      previewWarnings(preview.warnings),
+    ].join(""),
+  });
+  if (!confirmed) {
+    await discardOperationPreview(preview.previewToken);
+    return;
+  }
   await run(
     () =>
       bridge.apiPost("page/fetch", {
-        character,
-        languages,
-        includeSkin: $("#fetch-skin").checked,
+        previewToken: preview.previewToken,
       }),
     { success: "后台下载任务已创建" },
   );
@@ -835,19 +983,65 @@ function bindEvents() {
     openArchive(state.archiveDetail.character, event.target.value);
   });
   $("#drawer-export").addEventListener("click", exportCurrentArchive);
+  $("#drawer-select-all").addEventListener("click", () => {
+    const selectable = $$(
+      "[data-voice-select]:not(:disabled)",
+      $("#drawer-voice-list"),
+    );
+    const shouldSelect = !selectable.every((input) => input.checked);
+    selectable.forEach((input) => {
+      input.checked = shouldSelect;
+    });
+    updateArchiveSelection();
+  });
+  $("#drawer-batch-remove").addEventListener("click", batchRemoveVoices);
   $("#drawer-import").addEventListener("change", async (event) => {
     const file = event.target.files?.[0];
     const detail = state.archiveDetail;
     event.target.value = "";
     if (!file || !detail?.importToken) return;
+    const preview = await run(() =>
+      bridge.upload(`page/import/preview/${detail.importToken}`, file),
+    );
     const confirmed = await modalConfirm({
-      eyebrow: "BATCH IMPORT",
-      title: `导入 ${detail.base} / ${languageName(detail.language)}`,
-      message: "ZIP 中可识别的 WAV 会写入当前档案；同名文件会先自动备份。",
+      eyebrow: "BATCH IMPORT PREVIEW",
+      title: preview.title || `导入 ${detail.base} / ${languageName(detail.language)}`,
+      message: "ZIP 已完成安全校验。确认后才会写入当前档案。",
+      confirmLabel: `导入 ${preview.added + preview.overwritten} 个文件`,
+      fields: [
+        previewMetrics([
+          { label: "新增", value: preview.added },
+          { label: "覆盖", value: preview.overwritten, tone: preview.overwritten ? "warning" : "" },
+          { label: "相同/跳过", value: preview.skipped },
+          { label: "导入体积", value: formatBytes(preview.incomingBytes) },
+        ]),
+        preview.backupBytes
+          ? `<p class="preview-note">覆盖前预计备份 ${escapeHtml(formatBytes(preview.backupBytes))}</p>`
+          : "",
+        previewWarnings(preview.warnings),
+        previewSample(
+          (preview.sample || []).map(
+            (item) =>
+              `${item.voice} · ${
+                item.action === "add"
+                  ? "新增"
+                  : item.action === "overwrite"
+                    ? "覆盖"
+                    : "跳过"
+              }`,
+          ),
+        ),
+      ].join(""),
     });
-    if (!confirmed) return;
+    if (!confirmed) {
+      await discardOperationPreview(preview.previewToken);
+      return;
+    }
     await run(
-      () => bridge.upload(`page/import/${detail.importToken}`, file),
+      () =>
+        bridge.apiPost("page/import/commit", {
+          previewToken: preview.previewToken,
+        }),
       { success: "ZIP 语音包导入完成" },
     );
     await reloadArchiveDetail();
@@ -865,6 +1059,11 @@ function bindEvents() {
     if (action === "replace") {
       state.pendingReplace = { voice, token: row.dataset.token };
       $("#replace-file").click();
+    }
+  });
+  $("#drawer-voice-list").addEventListener("change", (event) => {
+    if (event.target.matches("[data-voice-select]")) {
+      updateArchiveSelection();
     }
   });
   $("#replace-file").addEventListener("change", async (event) => {

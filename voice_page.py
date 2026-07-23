@@ -38,7 +38,10 @@ class VoicePageManager:
     MAX_IMPORT_MEMBERS = 160
     MAX_AUDIT_ITEMS = 500
     MAX_TASK_ITEMS = 100
+    MAX_OPERATION_PREVIEWS = 8
+    OPERATION_PREVIEW_TTL = 15 * 60
     _TRASH_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+    _PREVIEW_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
     def __init__(
         self,
@@ -70,6 +73,7 @@ class VoicePageManager:
         self.backup_dir = self.page_dir / "backups"
         self.export_dir = self.page_dir / "exports"
         self.upload_dir = self.page_dir / "uploads"
+        self.preview_dir = self.page_dir / "previews"
         self.audit_file = self.page_dir / "audit.jsonl"
         self.integrity_file = self.page_dir / "integrity_report.json"
 
@@ -79,6 +83,7 @@ class VoicePageManager:
             self.backup_dir,
             self.export_dir,
             self.upload_dir,
+            self.preview_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
@@ -87,7 +92,9 @@ class VoicePageManager:
         self._fetch_semaphore = asyncio.Semaphore(2)
         self._tasks: Dict[str, dict] = {}
         self._task_handles: Dict[str, asyncio.Task] = {}
+        self._operation_previews: Dict[str, dict] = {}
         self._latest_integrity: dict = self._load_integrity_report()
+        self._cleanup_operation_previews(remove_orphans=True)
         self._register_routes()
 
     def _register_routes(self) -> None:
@@ -109,11 +116,47 @@ class VoicePageManager:
                 ["POST"],
                 "Import a voice ZIP",
             ),
+            (
+                "/import/preview/<token>",
+                self.preview_import,
+                ["POST"],
+                "Preview a voice ZIP import",
+            ),
+            (
+                "/import/commit",
+                self.commit_import,
+                ["POST"],
+                "Commit a previewed voice ZIP import",
+            ),
             ("/remove", self.remove_voice, ["POST"], "Move a voice to trash"),
+            (
+                "/remove/batch/preview",
+                self.preview_batch_remove,
+                ["POST"],
+                "Preview moving voice files to trash",
+            ),
+            (
+                "/remove/batch",
+                self.batch_remove,
+                ["POST"],
+                "Move previewed voice files to trash",
+            ),
             ("/trash", self.trash_items, ["GET"], "List recoverable files"),
             ("/restore", self.restore_voice, ["POST"], "Restore a trashed voice"),
             ("/purge", self.purge_voice, ["POST"], "Permanently delete trash"),
+            (
+                "/fetch/preview",
+                self.preview_fetch,
+                ["POST"],
+                "Preview a PRTS download task",
+            ),
             ("/fetch", self.start_fetch, ["POST"], "Start a PRTS download task"),
+            (
+                "/preview/discard",
+                self.discard_preview,
+                ["POST"],
+                "Discard a pending operation preview",
+            ),
             ("/tasks", self.tasks, ["GET"], "List Page background tasks"),
             (
                 "/task/cancel",
@@ -187,6 +230,172 @@ class VoicePageManager:
             raise ValueError("无效的上传目标")
 
         return payload
+
+    @staticmethod
+    def _path_signature(path: Path) -> Optional[tuple[int, int]]:
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+
+        if not path.is_file():
+            return None
+
+        return stat.st_size, stat.st_mtime_ns
+
+    @staticmethod
+    def _files_equal(first: Path, second: Path) -> bool:
+        try:
+            if first.stat().st_size != second.stat().st_size:
+                return False
+
+            with first.open("rb") as first_file, second.open("rb") as second_file:
+                while True:
+                    first_chunk = first_file.read(1024 * 1024)
+                    second_chunk = second_file.read(1024 * 1024)
+
+                    if first_chunk != second_chunk:
+                        return False
+
+                    if not first_chunk:
+                        return True
+
+        except OSError:
+            return False
+
+    def _cleanup_operation_previews(self, *, remove_orphans: bool = False) -> None:
+        now = time.time()
+        expired = [
+            preview_id
+            for preview_id, record in self._operation_previews.items()
+            if float(record.get("expiresEpoch", 0)) <= now
+        ]
+
+        for preview_id in expired:
+            record = self._operation_previews.pop(preview_id, None)
+            self._remove_preview_staging(record)
+
+        if remove_orphans:
+            active_staging = {
+                Path(record["stagingDir"]).resolve()
+                for record in self._operation_previews.values()
+                if record.get("stagingDir")
+            }
+
+            try:
+                paths = list(self.preview_dir.iterdir())
+            except OSError:
+                paths = []
+
+            for path in paths:
+                try:
+                    if path.resolve() not in active_staging:
+                        shutil.rmtree(path)
+                except OSError:
+                    continue
+
+        if len(self._operation_previews) <= self.MAX_OPERATION_PREVIEWS:
+            return
+
+        oldest = sorted(
+            self._operation_previews,
+            key=lambda current: float(
+                self._operation_previews[current].get("createdEpoch", 0)
+            ),
+        )
+
+        for preview_id in oldest[
+            : len(self._operation_previews) - self.MAX_OPERATION_PREVIEWS
+        ]:
+            record = self._operation_previews.pop(preview_id, None)
+            self._remove_preview_staging(record)
+
+    def _remove_preview_staging(self, record: Optional[dict]) -> None:
+        if not record or not record.get("stagingDir"):
+            return
+
+        path = Path(record["stagingDir"])
+
+        try:
+            if self._path_within(path, self.preview_dir) and path != self.preview_dir:
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
+
+    def _issue_operation_preview(
+        self,
+        *,
+        action: str,
+        payload: dict,
+        summary: dict,
+        staging_dir: Optional[Path] = None,
+        preview_id: Optional[str] = None,
+    ) -> dict:
+        self._cleanup_operation_previews()
+        preview_id = preview_id or uuid4().hex
+
+        if not self._PREVIEW_ID_RE.fullmatch(preview_id):
+            raise ValueError("无法创建操作预览")
+
+        now = time.time()
+        expires_epoch = now + self.OPERATION_PREVIEW_TTL
+        record = {
+            "id": preview_id,
+            "action": action,
+            "username": request.username or "dashboard",
+            "createdEpoch": now,
+            "expiresEpoch": expires_epoch,
+            "payload": payload,
+            "summary": summary,
+            "stagingDir": str(staging_dir) if staging_dir else None,
+        }
+        self._operation_previews[preview_id] = record
+        self._cleanup_operation_previews()
+
+        return {
+            **summary,
+            "previewToken": preview_id,
+            "expiresAt": datetime.fromtimestamp(
+                expires_epoch,
+                timezone.utc,
+            ).isoformat(timespec="seconds"),
+        }
+
+    def _take_operation_preview(self, token: Any, action: str) -> dict:
+        self._cleanup_operation_previews()
+        token = str(token or "")
+
+        if not self._PREVIEW_ID_RE.fullmatch(token):
+            raise ValueError("操作预览无效或已过期，请重新预览")
+
+        record = self._operation_previews.pop(token, None)
+
+        if (
+            record is None
+            or record.get("action") != action
+            or record.get("username") != (request.username or "dashboard")
+        ):
+            self._remove_preview_staging(record)
+            raise ValueError("操作预览无效或已过期，请重新预览")
+
+        return record
+
+    async def discard_preview(self):
+        payload = await request.json(default={})
+        token = payload.get("previewToken") if isinstance(payload, dict) else None
+        token = str(token or "")
+
+        if not self._PREVIEW_ID_RE.fullmatch(token):
+            return json_response({"discarded": False})
+
+        record = self._operation_previews.get(token)
+
+        if record and record.get("username") == (request.username or "dashboard"):
+            self._operation_previews.pop(token, None)
+            self._remove_preview_staging(record)
+            return json_response({"discarded": True})
+
+        return json_response({"discarded": False})
 
     def _path_within(self, path: Path, root: Path) -> bool:
         return bool(self.voice_mgr._path_is_within(path, root))
@@ -1027,6 +1236,230 @@ class VoicePageManager:
 
         return staged
 
+    async def preview_import(self, token: str):
+        zip_path = None
+        staging_dir = None
+
+        try:
+            payload = self._decode_token(token)
+            character = self._canonical_character(payload.get("character"))
+            language = str(payload.get("language", "")).strip().lower()
+
+            if language not in self.voice_mgr.LANGUAGE_MAP:
+                raise ValueError("语言代码无效")
+
+            files = await request.files()
+            upload = files.get("file")
+
+            if not isinstance(upload, PluginUploadFile):
+                raise ValueError("请选择 ZIP 文件")
+
+            if Path(upload.filename or "").suffix.lower() != ".zip":
+                raise ValueError("仅支持 ZIP 文件")
+
+            zip_path = await self._save_upload(
+                upload,
+                suffix=".zip",
+                max_bytes=self.MAX_IMPORT_BYTES,
+            )
+            preview_id = uuid4().hex
+            staging_dir = self.preview_dir / preview_id
+            staging_dir.mkdir(parents=True)
+            staged = await asyncio.to_thread(
+                self._stage_import,
+                zip_path,
+                staging_dir,
+            )
+            entries = []
+            added = 0
+            overwritten = 0
+            skipped = 0
+            incoming_bytes = 0
+            backup_bytes = 0
+
+            for voice, staged_path in staged.items():
+                target = self._own_voice_path(character, language, voice)
+                staged_bytes = staged_path.stat().st_size
+                target_signature = self._path_signature(target)
+                incoming_bytes += staged_bytes
+
+                if target_signature is None:
+                    action = "add"
+                    added += 1
+                elif await asyncio.to_thread(
+                    self._files_equal,
+                    staged_path,
+                    target,
+                ):
+                    action = "skip"
+                    skipped += 1
+                else:
+                    action = "overwrite"
+                    overwritten += 1
+                    backup_bytes += target_signature[0]
+
+                entries.append(
+                    {
+                        "voice": voice,
+                        "action": action,
+                        "targetSignature": target_signature,
+                        "incomingBytes": staged_bytes,
+                    }
+                )
+
+            summary = {
+                "action": "import",
+                "title": f"导入 {character} / {self.voice_mgr.LANGUAGE_MAP[language]['name']}",
+                "character": character,
+                "language": language,
+                "total": len(entries),
+                "added": added,
+                "overwritten": overwritten,
+                "skipped": skipped,
+                "incomingBytes": incoming_bytes,
+                "backupBytes": backup_bytes,
+                "warnings": (
+                    [
+                        "同名文件会在覆盖前备份；"
+                        "内容完全相同的文件不会重复写入。"
+                    ]
+                    if overwritten
+                    else ["内容完全相同的文件不会重复写入。"]
+                ),
+                "sample": [
+                    {
+                        "voice": entry["voice"],
+                        "action": entry["action"],
+                    }
+                    for entry in entries[:12]
+                ],
+            }
+            result = self._issue_operation_preview(
+                action="import",
+                payload={
+                    "character": character,
+                    "language": language,
+                    "entries": entries,
+                },
+                summary=summary,
+                staging_dir=staging_dir,
+                preview_id=preview_id,
+            )
+            staging_dir = None
+            return json_response(result)
+        except (OSError, ValueError, zipfile.BadZipFile) as exc:
+            return error_response(str(exc), status_code=400)
+        finally:
+            if zip_path is not None:
+                zip_path.unlink(missing_ok=True)
+
+            if staging_dir is not None:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+
+    async def commit_import(self):
+        payload = await request.json(default={})
+
+        if not isinstance(payload, dict):
+            return error_response("请求格式无效")
+
+        record = None
+
+        try:
+            record = self._take_operation_preview(
+                payload.get("previewToken"),
+                "import",
+            )
+            operation = record["payload"]
+            character = self._canonical_character(operation.get("character"))
+            language = str(operation.get("language", "")).strip().lower()
+            staging_dir = Path(record["stagingDir"])
+            entries = operation.get("entries", [])
+
+            if (
+                language not in self.voice_mgr.LANGUAGE_MAP
+                or not self._path_within(staging_dir, self.preview_dir)
+                or not isinstance(entries, list)
+            ):
+                raise ValueError("操作预览内容无效，请重新预览")
+
+            plan = []
+
+            for entry in entries:
+                voice = str(entry.get("voice", ""))
+                action = str(entry.get("action", ""))
+                staged_path = staging_dir / f"{voice}.wav"
+                target = self._own_voice_path(character, language, voice)
+                expected_signature = entry.get("targetSignature")
+                current_signature = self._path_signature(target)
+
+                if expected_signature is not None:
+                    expected_signature = tuple(expected_signature)
+
+                if current_signature != expected_signature:
+                    raise ValueError("档案状态在预览后发生变化，请重新预览")
+
+                if not staged_path.is_file() or action not in {
+                    "add",
+                    "overwrite",
+                    "skip",
+                }:
+                    raise ValueError("预览文件已失效，请重新预览")
+
+                if action == "skip" and not await asyncio.to_thread(
+                    self._files_equal,
+                    staged_path,
+                    target,
+                ):
+                    raise ValueError("档案状态在预览后发生变化，请重新预览")
+
+                plan.append((voice, action, staged_path, target))
+
+            backups = 0
+            imported = 0
+            skipped = 0
+
+            async with self._mutation_lock:
+                for _, action, staged_path, target in plan:
+                    if action == "skip":
+                        skipped += 1
+                        continue
+
+                    target.parent.mkdir(parents=True, exist_ok=True)
+
+                    if action == "overwrite":
+                        if self._backup_existing(target, "import") is not None:
+                            backups += 1
+
+                    os.replace(staged_path, target)
+                    imported += 1
+
+            if imported:
+                await self.scan_callback(True)
+
+            await self._audit(
+                "import_archive",
+                f"{character}/{language}",
+                details={
+                    "imported": imported,
+                    "backups": backups,
+                    "skipped": skipped,
+                    "previewed": True,
+                },
+            )
+            return json_response(
+                {
+                    "imported": imported,
+                    "backups": backups,
+                    "skipped": skipped,
+                    "character": character,
+                    "language": language,
+                }
+            )
+        except (OSError, ValueError, zipfile.BadZipFile) as exc:
+            return error_response(str(exc), status_code=400)
+        finally:
+            self._remove_preview_staging(record)
+
     async def import_archive(self, token: str):
         zip_path = None
 
@@ -1159,6 +1592,204 @@ class VoicePageManager:
                 details={"trashId": trash_id},
             )
             return json_response(metadata)
+        except (OSError, ValueError) as exc:
+            return error_response(str(exc), status_code=400)
+
+    async def preview_batch_remove(self):
+        payload = await request.json(default={})
+
+        if not isinstance(payload, dict):
+            return error_response("请求格式无效")
+
+        try:
+            character = self._canonical_character(payload.get("character"))
+            language = str(payload.get("language", "")).strip().lower()
+            requested_voices = payload.get("voices", [])
+
+            if language not in self.voice_mgr.LANGUAGE_MAP:
+                raise ValueError("语言代码无效")
+
+            if not isinstance(requested_voices, list):
+                raise ValueError("请选择要回收的语音")
+
+            voices = list(
+                dict.fromkeys(
+                    str(voice).strip()
+                    for voice in requested_voices
+                    if str(voice).strip() in self.voice_mgr.VOICE_DESCRIPTIONS
+                )
+            )
+
+            if not voices:
+                raise ValueError("请选择要回收的语音")
+
+            entries = []
+            unavailable = []
+            total_bytes = 0
+
+            for voice in voices:
+                target = self._own_voice_path(character, language, voice)
+                signature = self._path_signature(target)
+
+                if signature is None:
+                    unavailable.append(voice)
+                    continue
+
+                entries.append(
+                    {
+                        "voice": voice,
+                        "targetSignature": signature,
+                    }
+                )
+                total_bytes += signature[0]
+
+            if not entries:
+                raise ValueError("所选语音已不在当前档案中，请刷新后重试")
+
+            summary = {
+                "action": "batch_remove",
+                "title": (
+                    f"批量回收 {character} / "
+                    f"{self.voice_mgr.LANGUAGE_MAP[language]['name']}"
+                ),
+                "selected": len(voices),
+                "affected": len(entries),
+                "unavailable": len(unavailable),
+                "bytes": total_bytes,
+                "warnings": [
+                    "文件会移入可恢复回收站，不会立即释放磁盘空间。",
+                    *(
+                        [f"{len(unavailable)} 个条目已变化，将不会处理。"]
+                        if unavailable
+                        else []
+                    ),
+                ],
+                "sample": [entry["voice"] for entry in entries[:12]],
+            }
+            result = self._issue_operation_preview(
+                action="batch_remove",
+                payload={
+                    "character": character,
+                    "language": language,
+                    "entries": entries,
+                },
+                summary=summary,
+            )
+            return json_response(result)
+        except (OSError, ValueError) as exc:
+            return error_response(str(exc), status_code=400)
+
+    async def batch_remove(self):
+        payload = await request.json(default={})
+
+        if not isinstance(payload, dict):
+            return error_response("请求格式无效")
+
+        try:
+            record = self._take_operation_preview(
+                payload.get("previewToken"),
+                "batch_remove",
+            )
+            operation = record["payload"]
+            character = self._canonical_character(operation.get("character"))
+            language = str(operation.get("language", "")).strip().lower()
+            entries = operation.get("entries", [])
+
+            if (
+                language not in self.voice_mgr.LANGUAGE_MAP
+                or not isinstance(entries, list)
+            ):
+                raise ValueError("操作预览内容无效，请重新预览")
+
+            plan = []
+            username = request.username or "dashboard"
+
+            for entry in entries:
+                voice = str(entry.get("voice", ""))
+                target = self._own_voice_path(character, language, voice)
+                current_signature = self._path_signature(target)
+                expected_signature = entry.get("targetSignature")
+
+                if expected_signature is not None:
+                    expected_signature = tuple(expected_signature)
+
+                if current_signature is None or current_signature != expected_signature:
+                    raise ValueError("档案状态在预览后发生变化，请重新预览")
+
+                relative = target.resolve().relative_to(self.voices_dir.resolve())
+                trash_id = uuid4().hex
+                trash_item = self.trash_dir / trash_id
+                destination = trash_item / "file.wav"
+                metadata = {
+                    "id": trash_id,
+                    "deletedAt": self._utc_now(),
+                    "username": username,
+                    "character": character,
+                    "language": language,
+                    "voice": voice,
+                    "relativePath": relative.as_posix(),
+                    "bytes": current_signature[0],
+                    "batch": record["id"],
+                }
+                plan.append(
+                    {
+                        "target": target,
+                        "trashItem": trash_item,
+                        "destination": destination,
+                        "metadata": metadata,
+                    }
+                )
+
+            moved = []
+
+            async with self._mutation_lock:
+                try:
+                    for item in plan:
+                        item["trashItem"].mkdir(parents=True)
+                        self.voice_mgr._atomic_write_json(
+                            item["trashItem"] / "metadata.json",
+                            item["metadata"],
+                        )
+                        item["target"].replace(item["destination"])
+                        moved.append(item)
+                except Exception:
+                    for item in reversed(moved):
+                        try:
+                            item["target"].parent.mkdir(parents=True, exist_ok=True)
+                            item["destination"].replace(item["target"])
+                        except OSError:
+                            logger.exception(
+                                "批量回收回滚失败: "
+                                f"{item['metadata'].get('relativePath', '')}"
+                            )
+
+                    for item in plan:
+                        if item not in moved or item["target"].is_file():
+                            shutil.rmtree(item["trashItem"], ignore_errors=True)
+
+                    raise
+
+            await self.scan_callback(True)
+            total_bytes = sum(item["metadata"]["bytes"] for item in plan)
+            await self._audit(
+                "trash_batch",
+                f"{character}/{language}",
+                details={
+                    "batchId": record["id"],
+                    "count": len(plan),
+                    "bytes": total_bytes,
+                    "trashIds": [
+                        item["metadata"]["id"] for item in plan
+                    ],
+                },
+            )
+            return json_response(
+                {
+                    "removed": len(plan),
+                    "bytes": total_bytes,
+                    "batchId": record["id"],
+                }
+            )
         except (OSError, ValueError) as exc:
             return error_response(str(exc), status_code=400)
 
@@ -1347,33 +1978,151 @@ class VoicePageManager:
         self._trim_tasks()
         return dict(record)
 
+    def _normalize_fetch_payload(self, payload: dict) -> dict:
+        character = str(payload.get("character", "")).strip()
+
+        if not self.voice_mgr.validate_character(character):
+            raise ValueError("角色名称不合法")
+
+        rank_to_language = {
+            str(info["rank"]): code
+            for code, info in self.voice_mgr.LANGUAGE_MAP.items()
+        }
+        requested = str(
+            payload.get("languages", self.default_download_langs)
+        ).strip()
+        ranks = "".join(
+            dict.fromkeys(rank for rank in requested if rank in rank_to_language)
+        )
+
+        if not ranks:
+            raise ValueError("请选择至少一种下载语言")
+
+        return {
+            "character": character,
+            "languages": ranks,
+            "languageCodes": [rank_to_language[rank] for rank in ranks],
+            "includeSkin": bool(
+                payload.get("includeSkin", self.default_download_skin)
+            ),
+        }
+
+    async def preview_fetch(self):
+        payload = await request.json(default={})
+
+        if not isinstance(payload, dict):
+            return error_response("请求格式无效")
+
+        try:
+            operation = self._normalize_fetch_payload(payload)
+            character = operation["character"]
+            language_codes = operation["languageCodes"]
+            references = [character]
+
+            if operation["includeSkin"]:
+                for resource_id in self.voice_mgr.skin_voice_index.get(
+                    character,
+                    {},
+                ):
+                    reference = self.voice_mgr._skin_reference(
+                        character,
+                        resource_id,
+                    )
+
+                    if reference:
+                        references.append(reference)
+
+            existing = 0
+            overwritten = 0
+            missing = 0
+            damaged = 0
+
+            for reference in references:
+                for language in language_codes:
+                    force_redownload = self.voice_mgr.needs_voice_resource_remap(
+                        character,
+                        language,
+                    )
+
+                    for voice in self.voice_mgr.VOICE_DESCRIPTIONS:
+                        status = self._voice_status(reference, language, voice)
+
+                        if status["status"] == "own":
+                            if force_redownload:
+                                overwritten += 1
+                            else:
+                                existing += 1
+                        elif status["status"] == "damaged":
+                            damaged += 1
+                        else:
+                            missing += 1
+
+            language_names = [
+                self.voice_mgr.LANGUAGE_MAP[language]["name"]
+                for language in language_codes
+            ]
+            summary = {
+                "action": "fetch",
+                "title": f"获取 {character} 的语音资源",
+                "character": character,
+                "languageCodes": language_codes,
+                "languageNames": language_names,
+                "includeSkin": operation["includeSkin"],
+                "knownArchives": len(references),
+                "knownSlots": (
+                    len(references)
+                    * len(language_codes)
+                    * len(self.voice_mgr.VOICE_DESCRIPTIONS)
+                ),
+                "existing": existing,
+                "overwritten": overwritten,
+                "missing": missing,
+                "damaged": damaged,
+                "warnings": [
+                    (
+                        "有效本地文件会跳过；损坏、缺失或"
+                        "待编号修复的条目会重新请求。"
+                    ),
+                    *(
+                        [
+                            "PRTS 中尚未登记到本地的新皮肤包会在"
+                            "任务执行时加入，未计入上述数量。"
+                        ]
+                        if operation["includeSkin"]
+                        else []
+                    ),
+                ],
+            }
+            result = self._issue_operation_preview(
+                action="fetch",
+                payload=operation,
+                summary=summary,
+            )
+            return json_response(result)
+        except (OSError, ValueError) as exc:
+            return error_response(str(exc), status_code=400)
+
     async def start_fetch(self):
         payload = await request.json(default={})
 
         if not isinstance(payload, dict):
             return error_response("请求格式无效")
 
-        character = str(payload.get("character", "")).strip()
+        try:
+            if payload.get("previewToken"):
+                preview = self._take_operation_preview(
+                    payload.get("previewToken"),
+                    "fetch",
+                )
+                operation = self._normalize_fetch_payload(preview["payload"])
+            else:
+                operation = self._normalize_fetch_payload(payload)
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
 
-        if not self.voice_mgr.validate_character(character):
-            return error_response("角色名称不合法")
-
-        valid_ranks = {
-            str(info["rank"]) for info in self.voice_mgr.LANGUAGE_MAP.values()
-        }
-        requested = str(
-            payload.get("languages", self.default_download_langs)
-        ).strip()
-        languages = "".join(
-            rank for rank in requested if rank in valid_ranks
-        )
-
-        if not languages:
-            return error_response("请选择至少一种下载语言")
-
-        include_skin = bool(
-            payload.get("includeSkin", self.default_download_skin)
-        )
+        character = operation["character"]
+        languages = operation["languages"]
+        include_skin = operation["includeSkin"]
         username = request.username or "dashboard"
 
         async def runner() -> dict:

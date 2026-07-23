@@ -1447,13 +1447,29 @@ td strong {
 
 .voice-row {
   display: grid;
-  grid-template-columns: 16px minmax(110px, 1fr) 102px 72px auto;
+  grid-template-columns: 22px 16px minmax(110px, 1fr) 102px 72px auto;
   gap: 9px;
   align-items: center;
   min-height: 50px;
   padding: 8px 11px;
   border: 1px solid var(--line);
   background: var(--surface-alt);
+}
+
+.voice-select {
+  display: grid;
+  place-items: center;
+}
+
+.voice-select input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--yellow);
+}
+
+.voice-select input:disabled {
+  opacity: 0.25;
 }
 
 .voice-row h4 {
@@ -1570,6 +1586,95 @@ td strong {
   display: grid;
   gap: 11px;
   margin-top: 17px;
+}
+
+.preview-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.preview-metrics > div {
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid var(--line);
+  background: var(--surface-alt);
+}
+
+.preview-metrics strong,
+.preview-metrics span,
+.preview-metrics small {
+  display: block;
+}
+
+.preview-metrics strong {
+  overflow: hidden;
+  font: 750 18px/1.2 "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-metrics span {
+  margin-top: 5px;
+  color: var(--text-soft);
+  font-size: 9px;
+}
+
+.preview-metrics small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.preview-metrics .is-warning strong {
+  color: var(--orange);
+}
+
+.preview-metrics .is-danger strong {
+  color: var(--red);
+}
+
+.preview-warnings {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  color: var(--text-soft);
+  border-left: 3px solid var(--yellow);
+  background: var(--yellow-soft);
+}
+
+.preview-warnings p,
+.preview-note {
+  margin: 0 !important;
+  font-size: 9px;
+  line-height: 1.55 !important;
+}
+
+.preview-sample {
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  background: var(--surface-alt);
+}
+
+.preview-sample summary {
+  cursor: pointer;
+  color: var(--text-soft);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.preview-sample div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 9px;
+}
+
+.preview-sample span {
+  padding: 4px 6px;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  font-size: 8px;
 }
 
 #modal-fields label span {
@@ -1745,7 +1850,7 @@ td strong {
   }
 
   .voice-row {
-    grid-template-columns: 13px minmax(105px, 1fr) auto;
+    grid-template-columns: 18px 13px minmax(105px, 1fr) auto;
   }
 
   .voice-source,
