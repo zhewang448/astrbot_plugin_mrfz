@@ -3,6 +3,7 @@ import math
 import tempfile
 import threading
 import uuid
+from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -35,6 +36,7 @@ class VoiceRenderer:
     def __init__(self, font_path: str = None, output_dir: str = None):
         self.font_path = font_path
         self._font_cache = {}
+        self._font_bytes_cache: Dict[str, Optional[bytes]] = {}
         self.output_dir = Path(
             output_dir or Path(tempfile.gettempdir()) / "astrbot_plugin_mrfz"
         )
@@ -86,15 +88,41 @@ class VoiceRenderer:
             )
         return candidates
 
+    def _plugin_dir(self) -> Path:
+        return Path(__file__).parent
+
+    def _read_font_bytes(self, candidate: Path) -> Optional[bytes]:
+        key = str(candidate)
+        if key in self._font_bytes_cache:
+            return self._font_bytes_cache[key]
+
+        data: Optional[bytes] = None
+        try:
+            data = candidate.read_bytes()
+        except (OSError, IOError):
+            data = None
+
+        self._font_bytes_cache[key] = data
+        return data
+
     def _load_font(self, size: int, *, bold: bool = False, mono: bool = False):
         cache_key = (size, bold, mono)
         if cache_key in self._font_cache:
             return self._font_cache[cache_key]
 
+        plugin_dir = self._plugin_dir()
         font = None
         for candidate in self._font_candidates(bold=bold, mono=mono):
             try:
-                if candidate.exists() or str(candidate).lower().endswith(".ttc"):
+                is_ttc = str(candidate).lower().endswith(".ttc")
+
+                if self._is_bundled_font(candidate, plugin_dir):
+                    data = self._read_font_bytes(candidate)
+                    if data is None:
+                        continue
+                    font = ImageFont.truetype(BytesIO(data), size)
+                    break
+                if candidate.exists() or is_ttc:
                     font = ImageFont.truetype(str(candidate), size)
                     break
             except (OSError, IOError):
@@ -104,6 +132,15 @@ class VoiceRenderer:
             font = ImageFont.load_default()
         self._font_cache[cache_key] = font
         return font
+
+    @staticmethod
+    def _is_bundled_font(candidate: Path, plugin_dir: Path) -> bool:
+        """Return True when the font lives inside the plugin directory."""
+        try:
+            candidate.resolve().relative_to(plugin_dir.resolve())
+            return True
+        except (OSError, RuntimeError, ValueError):
+            return False
 
     @staticmethod
     def _new_rgba(size: Tuple[int, int], color=(0, 0, 0, 0)) -> Image.Image:
