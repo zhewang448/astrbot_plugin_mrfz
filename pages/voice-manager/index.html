@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="明日方舟角色语音插件的档案、下载、完整性和回收站管理控制台"
+    />
+    <title>语音档案控制台</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="noise" aria-hidden="true"></div>
+    <div class="app-shell">
+      <header class="topbar">
+        <button class="mobile-menu icon-button" id="mobile-menu" aria-label="打开导航">
+          <span></span><span></span><span></span>
+        </button>
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 52 52" role="img">
+              <path d="M8 9h27l9 9v25H8z" />
+              <path d="M15 18h19M15 26h22M15 34h15" />
+              <path d="M35 9v10h9" />
+            </svg>
+          </div>
+          <div>
+            <p class="eyebrow">RHODES ISLAND / VOICE OPS</p>
+            <h1>语音档案控制台</h1>
+          </div>
+        </div>
+        <div class="topbar-meta">
+          <span class="live-dot"></span>
+          <span id="connection-label">正在连接 AstrBot</span>
+          <span class="version-chip">v3.7.1</span>
+        </div>
+      </header>
+
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-label">CONTROL MODULES</div>
+        <nav aria-label="管理模块">
+          <button class="nav-item is-active" data-view="overview">
+            <span class="nav-code">01</span>
+            <span><b>总览</b><small>System Overview</small></span>
+          </button>
+          <button class="nav-item" data-view="archives">
+            <span class="nav-code">02</span>
+            <span><b>语音档案</b><small>Voice Archives</small></span>
+          </button>
+          <button class="nav-item" data-view="tasks">
+            <span class="nav-code">03</span>
+            <span><b>下载任务</b><small>PRTS Tasks</small></span>
+          </button>
+          <button class="nav-item" data-view="integrity">
+            <span class="nav-code">04</span>
+            <span><b>完整性</b><small>Integrity Check</small></span>
+          </button>
+          <button class="nav-item" data-view="bindings">
+            <span class="nav-code">05</span>
+            <span><b>快捷绑定</b><small>Quick Bindings</small></span>
+          </button>
+          <button class="nav-item" data-view="recovery">
+            <span class="nav-code">06</span>
+            <span><b>恢复与审计</b><small>Recovery & Audit</small></span>
+          </button>
+        </nav>
+        <div class="sidebar-status">
+          <span>INDEX STATUS</span>
+          <b id="sidebar-index-status">待同步</b>
+          <div class="meter"><i id="sidebar-meter"></i></div>
+          <small id="sidebar-storage">—</small>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <section class="view is-active" id="view-overview" data-view-panel="overview">
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">OPERATIONAL SUMMARY / 01</p>
+              <h2>系统总览</h2>
+              <p>本地语音档案、运行任务与存储状态的一站式视图。</p>
+            </div>
+            <button class="button button-primary" id="overview-rescan">
+              <span>重新扫描索引</span>
+            </button>
+          </div>
+
+          <div class="stat-grid" id="overview-stats">
+            <article class="stat-card skeleton-card"></article>
+            <article class="stat-card skeleton-card"></article>
+            <article class="stat-card skeleton-card"></article>
+            <article class="stat-card skeleton-card"></article>
+          </div>
+
+          <div class="dashboard-grid">
+            <article class="panel storage-panel">
+              <div class="panel-title">
+                <div><span>STORAGE MAP</span><h3>本地存储</h3></div>
+                <span class="status-tag status-ok">LOCAL</span>
+              </div>
+              <div class="storage-visual">
+                <div class="storage-ring" id="storage-ring">
+                  <strong id="storage-size">—</strong><small>VOICE DATA</small>
+                </div>
+                <div class="storage-legend" id="storage-legend"></div>
+              </div>
+            </article>
+
+            <article class="panel quick-panel">
+              <div class="panel-title">
+                <div><span>QUICK ACTIONS</span><h3>快速操作</h3></div>
+              </div>
+              <div class="quick-grid">
+                <button data-jump="archives"><b>浏览档案</b><span>筛选与试听 38 类语音</span></button>
+                <button data-jump="tasks"><b>获取角色</b><span>创建 PRTS 后台任务</span></button>
+                <button data-jump="integrity"><b>完整性检查</b><span>定位损坏与异常文件</span></button>
+                <button data-jump="recovery"><b>打开回收站</b><span>恢复最近删除的内容</span></button>
+              </div>
+            </article>
+
+            <article class="panel activity-panel">
+              <div class="panel-title">
+                <div><span>RECENT ACTIVITY</span><h3>最近操作</h3></div>
+                <button class="text-button" data-jump="recovery">全部记录 →</button>
+              </div>
+              <div class="timeline" id="overview-audit"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="view-archives" data-view-panel="archives">
+          <div class="page-heading compact">
+            <div>
+              <p class="eyebrow">VOICE ARCHIVES / 02</p>
+              <h2>语音档案</h2>
+              <p>基础档案与每一套皮肤包独立展示；回退语音带有来源标记。</p>
+            </div>
+            <button class="button button-secondary" id="archives-refresh">刷新档案</button>
+          </div>
+
+          <div class="filter-bar">
+            <label class="search-field">
+              <span>⌕</span>
+              <input id="archive-search" type="search" placeholder="搜索干员或皮肤名称…" />
+            </label>
+            <select id="archive-kind" aria-label="档案类型">
+              <option value="all">全部档案</option>
+              <option value="operator">基础干员</option>
+              <option value="skin">皮肤语音</option>
+            </select>
+            <select id="archive-language" aria-label="语音语言">
+              <option value="all">全部语言</option>
+            </select>
+            <div class="result-count" id="archive-count">—</div>
+          </div>
+
+          <div class="archive-grid" id="archive-grid"></div>
+          <div class="empty-state is-hidden" id="archive-empty">
+            <div class="empty-glyph">Ø</div>
+            <h3>没有匹配的语音档案</h3>
+            <p>调整筛选条件，或前往下载任务获取新的角色语音。</p>
+          </div>
+        </section>
+
+        <section class="view" id="view-tasks" data-view-panel="tasks">
+          <div class="page-heading compact">
+            <div>
+              <p class="eyebrow">PRTS RETRIEVAL / 03</p>
+              <h2>下载任务</h2>
+              <p>任务在后台执行，离开本页面不会中断正在进行的下载。</p>
+            </div>
+          </div>
+
+          <div class="two-column">
+            <article class="panel form-panel">
+              <div class="panel-title">
+                <div><span>NEW TASK</span><h3>获取角色语音</h3></div>
+              </div>
+              <form id="fetch-form">
+                <label>
+                  <span>角色名称</span>
+                  <input id="fetch-character" required maxlength="80" placeholder="例如：阿米娅" />
+                </label>
+                <fieldset>
+                  <legend>下载语言</legend>
+                  <div class="check-grid" id="fetch-languages"></div>
+                </fieldset>
+                <label class="switch-row">
+                  <span><b>同时获取皮肤语音</b><small>按照 PRTS 页面可用数据下载</small></span>
+                  <input id="fetch-skin" type="checkbox" checked />
+                  <i></i>
+                </label>
+                <button class="button button-primary button-wide" type="submit">
+                  创建后台任务
+                </button>
+              </form>
+            </article>
+
+            <article class="panel">
+              <div class="panel-title">
+                <div><span>TASK QUEUE</span><h3>任务队列</h3></div>
+                <button class="text-button" id="tasks-refresh">立即刷新</button>
+              </div>
+              <div class="task-list" id="task-list"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="view-integrity" data-view-panel="integrity">
+          <div class="page-heading compact">
+            <div>
+              <p class="eyebrow">INTEGRITY CONTROL / 04</p>
+              <h2>完整性检查</h2>
+              <p>识别损坏 WAV、未知语音名、不可读文件与路径异常。</p>
+            </div>
+          </div>
+
+          <div class="integrity-hero panel">
+            <div class="integrity-gauge" id="integrity-gauge">
+              <span>NO DATA</span>
+              <strong>—</strong>
+              <small>VALID FILES</small>
+            </div>
+            <div class="integrity-copy">
+              <p class="eyebrow">SAFE DIAGNOSTICS</p>
+              <h3>先检查，再决定是否隔离</h3>
+              <p>
+                普通检查只读；“检查并隔离”会把异常文件移至插件隔离目录，
+                随后自动重建索引，不会直接永久删除。
+              </p>
+              <div class="button-row">
+                <button class="button button-secondary" id="integrity-scan">仅检查</button>
+                <button class="button button-warning" id="integrity-quarantine">
+                  检查并隔离异常
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <article class="panel">
+            <div class="panel-title">
+              <div><span>LAST REPORT</span><h3>最近报告</h3></div>
+              <span id="integrity-time" class="muted">尚未检查</span>
+            </div>
+            <div class="report-summary" id="integrity-summary"></div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>相对路径</th><th>问题</th><th>处理结果</th></tr></thead>
+                <tbody id="integrity-issues"></tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+
+        <section class="view" id="view-bindings" data-view-panel="bindings">
+          <div class="page-heading compact">
+            <div>
+              <p class="eyebrow">QUICK BINDINGS / 05</p>
+              <h2>快捷绑定</h2>
+              <p>在聊天中用一个触发词快速播放指定档案与语音。</p>
+            </div>
+            <button class="button button-primary" id="binding-new">新建绑定</button>
+          </div>
+          <article class="panel">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>触发词</th><th>目标档案</th><th>语音</th><th>语言</th><th>状态</th><th></th></tr>
+                </thead>
+                <tbody id="binding-list"></tbody>
+              </table>
+            </div>
+            <div class="empty-state is-hidden" id="binding-empty">
+              <div class="empty-glyph">⌁</div>
+              <h3>还没有快捷绑定</h3>
+              <p>创建后，用户发送触发词即可播放对应语音。</p>
+            </div>
+          </article>
+        </section>
+
+        <section class="view" id="view-recovery" data-view-panel="recovery">
+          <div class="page-heading compact">
+            <div>
+              <p class="eyebrow">RECOVERY & AUDIT / 06</p>
+              <h2>恢复与审计</h2>
+              <p>回收站支持恢复；永久删除需要二次确认，所有管理操作都会记录。</p>
+            </div>
+          </div>
+
+          <div class="recovery-grid">
+            <article class="panel">
+              <div class="panel-title">
+                <div><span>RECYCLE BIN</span><h3>可恢复文件</h3></div>
+                <span class="count-chip" id="trash-count">0</span>
+              </div>
+              <div class="trash-list" id="trash-list"></div>
+              <div class="empty-state compact is-hidden" id="trash-empty">
+                <div class="empty-glyph">✓</div><h3>回收站为空</h3>
+              </div>
+            </article>
+            <article class="panel">
+              <div class="panel-title">
+                <div><span>AUDIT LOG</span><h3>操作记录</h3></div>
+                <button class="text-button" id="audit-refresh">刷新</button>
+              </div>
+              <div class="audit-list" id="audit-list"></div>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <aside class="drawer" id="archive-drawer" aria-hidden="true">
+      <div class="drawer-backdrop" data-close-drawer></div>
+      <div class="drawer-panel">
+        <header class="drawer-header">
+          <div>
+            <p class="eyebrow" id="drawer-kind">VOICE ARCHIVE</p>
+            <h2 id="drawer-title">—</h2>
+            <p id="drawer-subtitle">—</p>
+          </div>
+          <button class="icon-button drawer-close" data-close-drawer aria-label="关闭">×</button>
+        </header>
+        <div class="drawer-toolbar">
+          <select id="drawer-language" aria-label="选择语言"></select>
+          <button class="button button-secondary" id="drawer-export">导出当前语言</button>
+          <button class="button button-secondary" id="drawer-select-all">
+            全选本包
+          </button>
+          <button class="button button-warning" id="drawer-batch-remove" disabled>
+            批量回收 <span id="drawer-selected-count">0</span>
+          </button>
+          <label class="button button-secondary file-button">
+            批量导入 ZIP
+            <input id="drawer-import" type="file" accept=".zip,application/zip" />
+          </label>
+        </div>
+        <div class="voice-legend">
+          <span><i class="dot-own"></i>本档案</span>
+          <span><i class="dot-fallback"></i>基础回退</span>
+          <span><i class="dot-missing"></i>缺失</span>
+          <span><i class="dot-damaged"></i>损坏</span>
+        </div>
+        <div class="voice-list" id="drawer-voice-list"></div>
+      </div>
+    </aside>
+
+    <div class="audio-dock is-hidden" id="audio-dock">
+      <div class="audio-meta">
+        <span class="live-dot"></span>
+        <div><small>NOW PLAYING</small><b id="audio-title">—</b></div>
+      </div>
+      <audio id="audio-player" controls preload="metadata"></audio>
+      <button class="icon-button" id="audio-close" aria-label="关闭播放器">×</button>
+    </div>
+
+    <dialog class="modal" id="modal">
+      <form method="dialog" class="modal-card">
+        <div class="modal-accent"></div>
+        <p class="eyebrow" id="modal-eyebrow">CONFIRM ACTION</p>
+        <h3 id="modal-title">确认操作</h3>
+        <p id="modal-message"></p>
+        <div id="modal-fields"></div>
+        <div class="modal-actions">
+          <button class="button button-secondary" value="cancel">取消</button>
+          <button class="button button-warning" id="modal-confirm" value="confirm">确认</button>
+        </div>
+      </form>
+    </dialog>
+
+    <input id="replace-file" type="file" accept=".wav,audio/wav" hidden />
+    <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
