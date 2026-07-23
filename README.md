@@ -71,10 +71,11 @@ astrbot_plugin_mrfz/
 └── requirements.txt        # 依赖列表
 ```
 
-2. 插件数据目录
-   位于`AstrBot/data/plugin_data/astrbot_plugin_mrfz/`：
+### 2. 插件数据目录
 
-```
+位于 `AstrBot/data/plugin_data/astrbot_plugin_mrfz/`：
+
+```text
 astrbot_plugin_mrfz/
 ├── assets/                 # [自动生成] 干员头像缓存目录
 │   ├── 阿米娅.png
@@ -160,6 +161,7 @@ astrbot_plugin_mrfz/
 1. **资源来源**：所有语音和图片资源实时爬取自 [PRTS Wiki](https://prts.wiki/)，请遵守相关使用协议。
 2. **网络问题**：批量下载语音时请确保网络通畅，以免下载不完整。
 3. **文件删除**：可自行在`\data\plugin_data\astrbot_plugin_mrfz\voices\`目录下删除不需要的语音文件，并在之后重载插件。
+4. **版本更新与数据迁移**：新版本升级了本地语音索引结构，更新后首次启动会自动进行数据迁移，包括迁移旧版皮肤目录、修复错位的语音资源编号、补齐皮肤稳定索引等。这些步骤会联网请求 PRTS，耗时可能较长；期间部分语音可能暂时无法播放或显示不完整，属于正常现象。请耐心等待，留意日志中的迁移完成提示，不要在迁移过程中反复重载插件，以免中断迁移。
 
 ## 📄 许可证
 
