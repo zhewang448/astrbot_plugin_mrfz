@@ -818,7 +818,7 @@ class VoicePageManager:
         )
         return json_response(
             {
-                "version": "3.7.1",
+                "version": "3.7.2",
                 "operators": operators,
                 "skins": skins,
                 "languages": languages,

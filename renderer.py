@@ -897,7 +897,7 @@ class VoiceRenderer:
         )
         draw.text(
             (diag_x + 15, diag_y + 51),
-            "/mrfz W皮肤[恍惚]",
+            "/mrfz 超新星",
             font=self._load_font(16, bold=True, mono=True),
             fill=self.COLOR_TEXT,
         )

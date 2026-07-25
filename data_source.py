@@ -617,6 +617,33 @@ class VoiceManager:
 
         return sorted(set(options))
 
+    def get_skin_name_matches(self, skin_name: str) -> List[str]:
+        """按皮肤展示名反查当前本地可播放的皮肤引用。"""
+        skin_name = skin_name.strip()
+
+        if not skin_name:
+            return []
+
+        matches = []
+
+        for character, packages in self.skin_voice_index.items():
+            for resource_id in packages:
+                info = self.skin_metadata.get(character, {}).get(resource_id, {})
+                aliases = {
+                    str(info.get("name", "")).strip(),
+                    str(info.get("directory", "")).strip(),
+                    resource_id,
+                }
+
+                if skin_name not in aliases:
+                    continue
+
+                reference = self._skin_reference(character, resource_id)
+                if reference:
+                    matches.append(reference)
+
+        return sorted(set(matches))
+
     def resolve_character_reference(
         self,
         character: str,
@@ -636,7 +663,16 @@ class VoiceManager:
 
         if not is_skin:
             reference = base_character
-            return (reference if reference in self.voice_index else None), []
+            if reference in self.voice_index:
+                return reference, []
+
+            # 兼容直接输入皮肤展示名，例如“超新星”，无需再输入
+            # “维什戴尔皮肤[超新星]”。重名皮肤保留候选列表，交给上层提示用户选择。
+            skin_matches = self.get_skin_name_matches(reference)
+            if len(skin_matches) == 1:
+                return skin_matches[0], []
+
+            return None, skin_matches
 
         packages = self.skin_voice_index.get(base_character, {})
         options = self.get_skin_options(base_character)

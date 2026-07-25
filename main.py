@@ -27,7 +27,7 @@ SCAN_CACHE_DURATION = 60
     "astrbot_plugin_mrfz",
     "bushikq",
     "明日方舟角色语音插件",
-    "3.7.1",
+    "3.7.2",
 )
 class MyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -261,11 +261,17 @@ class MyPlugin(Star):
     ) -> str:
         base = VoiceManager._base_character(character) or character
         option_lines = "\n".join(f"- {option}" for option in options)
-        reason = (
-            f"检测到 {base} 有多套皮肤语音，请指定具体皮肤"
-            if len(options) > 1
-            else f"未找到指定的 {base} 皮肤，当前可用项如下"
-        )
+        parsed = VoiceManager._parse_character_reference(character)
+
+        if parsed and not parsed[1]:
+            reason = f"皮肤名称「{character}」对应多个可播放皮肤，请指定具体项"
+        else:
+            reason = (
+                f"检测到 {base} 有多套皮肤语音，请指定具体皮肤"
+                if len(options) > 1
+                else f"未找到指定的 {base} 皮肤，当前可用项如下"
+            )
+
         return f"{reason}：\n{option_lines}\n例如：/mrfz {options[0]} 问候 中文"
 
     @staticmethod
