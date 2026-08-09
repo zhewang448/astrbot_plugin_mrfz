@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import tempfile
+from collections import OrderedDict
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -15,149 +16,29 @@ from astrbot.api import logger
 from bs4 import BeautifulSoup
 from PIL import Image as PILImage
 
+from . import constants
+
 
 class PRTSLookupError(Exception):
     """PRTS 角色页请求或解析失败，并携带可直接展示的原因。"""
 
 
 class VoiceManager:
-    DEFAULT_HEADERS = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/138.0.0.0 Safari/537.36"
-        ),
-        "Referer": "https://prts.wiki/",
-        "Accept": (
-            "text/html,application/xhtml+xml,application/xml;q=0.9,"
-            "image/avif,image/webp,*/*;q=0.8"
-        ),
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-    }
-
-    # 游戏资源编号并不连续，不能用语音名称的列表位置拼接 URL。
-    # 例如“编入队伍”和“任命队长”实际使用 CN_017/CN_018，
-    # “问候”“生日”“周年庆典”实际使用 CN_042/CN_043/CN_044。
-    VOICE_RESOURCE_IDS = {
-        "任命助理": 1,
-        "交谈1": 2,
-        "交谈2": 3,
-        "交谈3": 4,
-        "晋升后交谈1": 5,
-        "晋升后交谈2": 6,
-        "信赖提升后交谈1": 7,
-        "信赖提升后交谈2": 8,
-        "信赖提升后交谈3": 9,
-        "闲置": 10,
-        "干员报到": 11,
-        "观看作战记录": 12,
-        "精英化晋升1": 13,
-        "精英化晋升2": 14,
-        "编入队伍": 17,
-        "任命队长": 18,
-        "行动出发": 19,
-        "行动开始": 20,
-        "选中干员1": 21,
-        "选中干员2": 22,
-        "部署1": 23,
-        "部署2": 24,
-        "作战中1": 25,
-        "作战中2": 26,
-        "作战中3": 27,
-        "作战中4": 28,
-        "完成高难行动": 29,
-        "3星结束行动": 30,
-        "非3星结束行动": 31,
-        "行动失败": 32,
-        "进驻设施": 33,
-        "戳一下": 34,
-        "信赖触摸": 36,
-        "标题": 37,
-        "新年祝福": 38,
-        "问候": 42,
-        "生日": 43,
-        "周年庆典": 44,
-    }
-
-    # 字典插入顺序即列表显示和随机选择使用的语音顺序。
-    # 名称列表由资源映射派生，避免两份常量各自维护后发生错位。
-    VOICE_DESCRIPTIONS = list(VOICE_RESOURCE_IDS)
-
-    LANGUAGE_MAP = {
-        "cn": {
-            "name": "中文",
-            "rank": "2",
-            "color": (46, 125, 50),
-        },
-        "jp": {
-            "name": "日语",
-            "rank": "3",
-            "color": (21, 101, 192),
-        },
-        "us": {
-            "name": "英语",
-            "rank": "4",
-            "color": (198, 40, 40),
-        },
-        "kr": {
-            "name": "韩语",
-            "rank": "5",
-            "color": (97, 97, 97),
-        },
-        "fy": {
-            "name": "方言",
-            "rank": "1",
-            "color": (230, 81, 0),
-        },
-        "it": {
-            "name": "意语",
-            "rank": "6",
-            "color": (0, 131, 143),
-        },
-    }
-
-    LANG_ALIAS = {
-        "中文": "cn",
-        "普通话": "cn",
-        "中": "cn",
-        "汉语": "cn",
-        "cn": "cn",
-        "2": "cn",
-        "日文": "jp",
-        "日语": "jp",
-        "日": "jp",
-        "jp": "jp",
-        "3": "jp",
-        "英文": "us",
-        "英语": "us",
-        "英": "us",
-        "us": "us",
-        "4": "us",
-        "韩文": "kr",
-        "韩语": "kr",
-        "韩": "kr",
-        "kr": "kr",
-        "5": "kr",
-        "方言": "fy",
-        "方": "fy",
-        "fy": "fy",
-        "1": "fy",
-        "意文": "it",
-        "意语": "it",
-        "意大利语": "it",
-        "意": "it",
-        "it": "it",
-        "6": "it",
-    }
+    # 使用 constants 模块中的常量
+    DEFAULT_HEADERS = constants.DEFAULT_HEADERS
+    VOICE_RESOURCE_IDS = constants.VOICE_RESOURCE_IDS
+    VOICE_DESCRIPTIONS = constants.VOICE_DESCRIPTIONS
+    LANGUAGE_MAP = constants.LANGUAGE_MAP
+    LANG_ALIAS = constants.LANG_ALIAS
 
     MAX_CHARACTER_LENGTH = 80
     MAX_SKIN_ID_LENGTH = 80
-    MAX_VOICE_BYTES = 20 * 1024 * 1024
-    MAX_IMAGE_BYTES = 10 * 1024 * 1024
-    DOWNLOAD_RETRIES = 3
-    CHARACTER_PAGE_RETRIES = 3
-    RETRYABLE_PAGE_STATUSES = {429, 500, 502, 503, 504}
-    VOICE_RESOURCE_MAP_VERSION = 2
+    MAX_VOICE_BYTES = constants.MAX_VOICE_BYTES
+    MAX_IMAGE_BYTES = constants.MAX_IMAGE_BYTES
+    DOWNLOAD_RETRIES = constants.DOWNLOAD_RETRIES
+    CHARACTER_PAGE_RETRIES = constants.CHARACTER_PAGE_RETRIES
+    RETRYABLE_PAGE_STATUSES = constants.RETRYABLE_PAGE_STATUSES
+    VOICE_RESOURCE_MAP_VERSION = constants.VOICE_RESOURCE_MAP_VERSION
 
     _SAFE_COMPONENT_RE = re.compile(
         r"^[\w\- .·()（）]+$",
@@ -202,10 +83,9 @@ class VoiceManager:
             Dict[str, Dict[str, Any]],
         ] = {}
 
-        self._download_locks: Dict[
-            str,
-            asyncio.Lock,
-        ] = {}
+        # 使用 OrderedDict 实现 LRU 缓存，避免无限增长
+        self._download_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
+        self._max_locks = constants.MAX_DOWNLOAD_LOCKS
 
         # v3 及更早版本按连续编号下载过语音，已有 WAV 可能内容与名称错位。
         # 迁移按“角色 + 语言”记录，只有整组请求没有真实失败时才清除。
@@ -235,7 +115,7 @@ class VoiceManager:
             with index_path.open("r", encoding="utf-8") as handle:
                 payload = json.load(handle)
 
-            if payload.get("version") not in {3, 4}:
+            if payload.get("version") not in constants.SUPPORTED_VOICE_INDEX_VERSIONS:
                 return
 
             try:
@@ -854,7 +734,7 @@ class VoiceManager:
                 self._voice_remap_pending = remap_targets
 
         payload = {
-            "version": 4,
+            "version": constants.VOICE_INDEX_VERSION,
             "voice_resource_map_version": (
                 self._voice_resource_map_version
                 if self._voice_remap_pending
@@ -1256,11 +1136,18 @@ class VoiceManager:
         self,
         character: str,
     ) -> asyncio.Lock:
-        lock = self._download_locks.get(character)
+        """获取角色下载锁，使用 LRU 缓存避免内存泄漏。"""
+        if character in self._download_locks:
+            # 移到末尾表示最近使用
+            self._download_locks.move_to_end(character)
+            return self._download_locks[character]
 
-        if lock is None:
-            lock = asyncio.Lock()
-            self._download_locks[character] = lock
+        lock = asyncio.Lock()
+        self._download_locks[character] = lock
+
+        # 超过限制时移除最老的锁
+        if len(self._download_locks) > self._max_locks:
+            self._download_locks.popitem(last=False)
 
         return lock
 
@@ -1340,7 +1227,7 @@ class VoiceManager:
                             (f"PRTS 返回了角色 {base_character} 的空语音记录"),
                         )
 
-                    base_url = "https://torappu.prts.wiki/assets/audio"
+                    base_url = constants.PRTS_AUDIO_BASE_URL
 
                     for (
                         language_label,
@@ -1918,6 +1805,31 @@ class VoiceManager:
     ) -> bool:
         return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WAVE"
 
+    @classmethod
+    def _is_trusted_prts_url(cls, url: str) -> bool:
+        """校验 URL 是否指向 PRTS 白名单主机。
+
+        同时拒绝携带 userinfo 的地址，避免 https://prts.wiki@evil.com
+        这类写法绕过主机判断。
+        """
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            return False
+
+        if parsed.username or parsed.password or parsed.scheme != "https":
+            return False
+
+        hostname = parsed.hostname
+
+        if not hostname:
+            return False
+
+        return any(
+            hostname == allowed or hostname.endswith(f".{allowed}")
+            for allowed in constants.PRTS_ALLOWED_HOSTS
+        )
+
     async def _get_character_id_map(
         self,
         character: str,
@@ -1935,7 +1847,7 @@ class VoiceManager:
             safe="",
         )
 
-        url = f"https://prts.wiki/w/{encoded_character}/语音记录"
+        url = constants.PRTS_VOICE_PAGE_URL.format(character=encoded_character)
 
         owns_session = session is None
 
@@ -2005,12 +1917,8 @@ class VoiceManager:
             if not voice_div:
                 raise PRTSLookupError("PRTS 页面结构可能已变化：未找到语音记录节点")
 
-            voice_data = str(
-                voice_div.get(
-                    "data-voice-base",
-                    "",
-                )
-            )
+            voice_data = voice_div.get("data-voice-base") or ""
+            voice_data = str(voice_data).strip()
 
             result = {}
 
@@ -2106,7 +2014,7 @@ class VoiceManager:
             safe="",
         )
 
-        page_url = f"https://prts.wiki/w/文件:头像_{encoded_character}.png"
+        page_url = constants.PRTS_AVATAR_PAGE_URL.format(character=encoded_character)
 
         owns_session = session is None
 
@@ -2147,19 +2055,11 @@ class VoiceManager:
                 )
 
             image_url = urljoin(
-                "https://prts.wiki/",
+                constants.PRTS_BASE_URL,
                 str(meta["content"]),
             )
-            parsed_url = urlparse(image_url)
 
-            if (
-                parsed_url.scheme != "https"
-                or not parsed_url.hostname
-                or not (
-                    parsed_url.hostname == "prts.wiki"
-                    or parsed_url.hostname.endswith(".prts.wiki")
-                )
-            ):
+            if not self._is_trusted_prts_url(image_url):
                 return (
                     False,
                     "头像链接来源不可信",

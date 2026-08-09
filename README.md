@@ -65,10 +65,13 @@ astrbot_plugin_mrfz/
 ├── data_source.py          # 数据源与下载逻辑
 ├── renderer.py             # 图片渲染模块
 ├── voice_page.py           # Pages 管理后端
+├── constants.py            # 全局常量（版本、限额、语言与资源映射）
+├── config.py               # 配置对象 PluginConfig
 ├── pages/voice-manager/    # 管理端前端
 ├── SourceHanSerifCN...otf  # 字体文件
 ├── _conf_schema.json       # WebUI 配置定义
-└── requirements.txt        # 依赖列表
+├── requirements.txt        # 依赖列表
+└── CHANGELOG.md            # 更新日志
 ```
 
 ### 2. 插件数据目录

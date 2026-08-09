@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import time
 import zipfile
 from collections import deque
@@ -24,22 +25,24 @@ from astrbot.api.web import (
     request,
 )
 
+from . import constants
 
-PLUGIN_NAME = "astrbot_plugin_mrfz"
+
+PLUGIN_NAME = constants.PLUGIN_NAME
 PAGE_PREFIX = f"/{PLUGIN_NAME}/page"
 
 
 class VoicePageManager:
     """AstrBot Plugin Page backend for safe voice archive management."""
 
-    MAX_PREVIEW_BYTES = 12 * 1024 * 1024
-    MAX_UPLOAD_BYTES = 24 * 1024 * 1024
-    MAX_IMPORT_BYTES = 220 * 1024 * 1024
-    MAX_IMPORT_MEMBERS = 160
-    MAX_AUDIT_ITEMS = 500
-    MAX_TASK_ITEMS = 100
-    MAX_OPERATION_PREVIEWS = 8
-    OPERATION_PREVIEW_TTL = 15 * 60
+    MAX_PREVIEW_BYTES = constants.MAX_PREVIEW_BYTES
+    MAX_UPLOAD_BYTES = constants.MAX_UPLOAD_BYTES
+    MAX_IMPORT_BYTES = constants.MAX_IMPORT_BYTES
+    MAX_IMPORT_MEMBERS = constants.MAX_IMPORT_MEMBERS
+    MAX_AUDIT_ITEMS = constants.MAX_AUDIT_ITEMS
+    MAX_TASK_ITEMS = constants.MAX_TASK_ITEMS
+    MAX_OPERATION_PREVIEWS = constants.MAX_OPERATION_PREVIEWS
+    OPERATION_PREVIEW_TTL = constants.OPERATION_PREVIEW_TTL
     _TRASH_ID_RE = re.compile(r"^[0-9a-f]{32}$")
     _PREVIEW_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
@@ -90,11 +93,13 @@ class VoicePageManager:
         self._mutation_lock = asyncio.Lock()
         self._audit_lock = asyncio.Lock()
         self._fetch_semaphore = asyncio.Semaphore(2)
+        self._preview_cleanup_lock = threading.Lock()
         self._tasks: Dict[str, dict] = {}
         self._task_handles: Dict[str, asyncio.Task] = {}
         self._operation_previews: Dict[str, dict] = {}
         self._latest_integrity: dict = self._load_integrity_report()
         self._cleanup_operation_previews(remove_orphans=True)
+        self._cleanup_orphan_uploads()
         self._register_routes()
 
     def _register_routes(self) -> None:
@@ -264,16 +269,17 @@ class VoicePageManager:
             return False
 
     def _cleanup_operation_previews(self, *, remove_orphans: bool = False) -> None:
-        now = time.time()
-        expired = [
-            preview_id
-            for preview_id, record in self._operation_previews.items()
-            if float(record.get("expiresEpoch", 0)) <= now
-        ]
+        with self._preview_cleanup_lock:
+            now = time.time()
+            expired = [
+                preview_id
+                for preview_id, record in self._operation_previews.items()
+                if float(record.get("expiresEpoch", 0)) <= now
+            ]
 
-        for preview_id in expired:
-            record = self._operation_previews.pop(preview_id, None)
-            self._remove_preview_staging(record)
+            for preview_id in expired:
+                record = self._operation_previews.pop(preview_id, None)
+                self._remove_preview_staging(record)
 
         if remove_orphans:
             active_staging = {
@@ -294,21 +300,31 @@ class VoicePageManager:
                 except OSError:
                     continue
 
-        if len(self._operation_previews) <= self.MAX_OPERATION_PREVIEWS:
-            return
+            if len(self._operation_previews) <= self.MAX_OPERATION_PREVIEWS:
+                return
 
-        oldest = sorted(
-            self._operation_previews,
-            key=lambda current: float(
-                self._operation_previews[current].get("createdEpoch", 0)
-            ),
-        )
+            oldest = sorted(
+                self._operation_previews,
+                key=lambda current: float(
+                    self._operation_previews[current].get("createdEpoch", 0)
+                ),
+            )
 
-        for preview_id in oldest[
-            : len(self._operation_previews) - self.MAX_OPERATION_PREVIEWS
-        ]:
-            record = self._operation_previews.pop(preview_id, None)
-            self._remove_preview_staging(record)
+            for preview_id in oldest[
+                : len(self._operation_previews) - self.MAX_OPERATION_PREVIEWS
+            ]:
+                record = self._operation_previews.pop(preview_id, None)
+                self._remove_preview_staging(record)
+
+    def _cleanup_orphan_uploads(self) -> None:
+        """清理超过 1 小时的孤儿临时文件，防止进程崩溃导致的泄漏。"""
+        cutoff = time.time() - constants.ORPHAN_UPLOAD_TTL
+        try:
+            for path in self.upload_dir.iterdir():
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def _remove_preview_staging(self, record: Optional[dict]) -> None:
         if not record or not record.get("stagingDir"):
@@ -818,7 +834,7 @@ class VoicePageManager:
         )
         return json_response(
             {
-                "version": "3.7.2",
+                "version": constants.PLUGIN_VERSION,
                 "operators": operators,
                 "skins": skins,
                 "languages": languages,
@@ -1084,15 +1100,19 @@ class VoicePageManager:
         if not target.is_file():
             return None
 
-        relative = target.resolve().relative_to(self.voices_dir.resolve())
-        backup_root = self.backup_dir / (
-            datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            + f"-{reason}-{uuid4().hex[:8]}"
-        )
-        destination = backup_root / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(target, destination)
-        return destination
+        try:
+            relative = target.resolve().relative_to(self.voices_dir.resolve())
+            backup_root = self.backup_dir / (
+                datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                + f"-{reason}-{uuid4().hex[:8]}"
+            )
+            destination = backup_root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(target, destination)
+            return destination
+        except OSError as exc:
+            logger.warning(f"备份文件失败 {target}: {exc}")
+            return None
 
     async def _save_upload(
         self,
@@ -1223,8 +1243,17 @@ class VoicePageManager:
 
                 target = staging_dir / f"{voice}.wav"
 
+                # 流式解压，实际检测解压后大小，防止 ZIP 炸弹
+                extracted = 0
                 with archive.open(member) as source, target.open("wb") as output:
-                    shutil.copyfileobj(source, output, length=1024 * 1024)
+                    while True:
+                        chunk = source.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        extracted += len(chunk)
+                        if extracted > self.MAX_UPLOAD_BYTES:
+                            raise ValueError(f"单个语音文件解压后超过限制：{voice}")
+                        output.write(chunk)
 
                 if not self.voice_mgr._is_valid_wav_file(target):
                     raise ValueError(f"WAV 文件无效：{voice}")
@@ -2352,7 +2381,9 @@ class VoicePageManager:
 
         try:
             if not self.valid_trigger(trigger):
-                raise ValueError("触发词不能为空且最长 64 个字符")
+                raise ValueError(
+                    f"触发词不能为空且最长 {constants.MAX_TRIGGER_LENGTH} 个字符"
+                )
 
             character = self._canonical_character(payload.get("character"))
 
