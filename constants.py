@@ -7,7 +7,7 @@
 # 这三个文件不是 Python，无法引用本常量。
 
 PLUGIN_NAME = "astrbot_plugin_mrfz"
-PLUGIN_VERSION = "3.7.2"
+PLUGIN_VERSION = "3.7.3"
 
 # ============================================================
 # 文件大小限制
