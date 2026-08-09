@@ -4,7 +4,7 @@ import json
 import random
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 from uuid import uuid4
 
 from astrbot.api import AstrBotConfig, logger
@@ -13,56 +13,36 @@ from astrbot.api.message_components import Image, Plain, Record
 from astrbot.api.star import Context, Star, StarTools, register
 
 # 引入拆分后的模块
+from . import constants
+from .config import PluginConfig
 from .data_source import VoiceManager
 from .renderer import VoiceRenderer
 from .voice_page import VoicePageManager
 
 
-# 常量定义
-FUZZY_MATCH_THRESHOLD = 0.6
-SCAN_CACHE_DURATION = 60
-
-
 @register(
-    "astrbot_plugin_mrfz",
+    constants.PLUGIN_NAME,
     "bushikq",
     "明日方舟角色语音插件",
-    "3.7.2",
+    constants.PLUGIN_VERSION,
 )
 class MyPlugin(Star):
-    def __init__(self, context: Context, config: AstrBotConfig):
+    def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
-        self.config = config
 
         # 1. 初始化路径
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_mrfz")
         self.plugin_dir = Path(__file__).parent
         self.custom_cmd_file = self.data_dir / "custom_commands.json"
 
-        # 2. 初始化核心模块
+        # 2. 加载配置
+        self.plugin_config = PluginConfig.from_dict(config)
+
+        # 3. 初始化核心模块
         self.voice_mgr = VoiceManager(self.data_dir, self.plugin_dir)
         self.renderer = VoiceRenderer(
             font_path=self.plugin_dir / "SourceHanSerifCN-Medium-6.otf",
             output_dir=self.data_dir / "render_cache",
-        )
-
-        # 3. 加载普通配置
-        self.auto_download = self.config.get("auto_download", True)
-        self.allow_public_auto_download = self.config.get(
-            "allow_public_auto_download",
-            True,
-        )
-        self.auto_download_skin = self.config.get(
-            "auto_download_skin",
-            True,
-        )
-        self.download_langs = self.config.get(
-            "auto_download_language",
-            "123",
-        )
-        self.default_lang_rank = self.config.get(
-            "default_language_rank",
-            "123456",
         )
 
         # 4. 加载自定义指令
@@ -84,9 +64,9 @@ class MyPlugin(Star):
             save_custom_commands=self._save_custom_commands,
             scan_callback=self._scan_if_needed,
             valid_trigger=self._valid_trigger,
-            default_language_rank=self.default_lang_rank,
-            default_download_langs=self.download_langs,
-            default_download_skin=self.auto_download_skin,
+            default_language_rank=self.plugin_config.default_language_rank,
+            default_download_langs=self.plugin_config.auto_download_language,
+            default_download_skin=self.plugin_config.auto_download_skin,
         )
 
     # ================== 持久化存储逻辑 ==================
@@ -195,7 +175,7 @@ class MyPlugin(Star):
     async def _initialize_resources(self) -> None:
         try:
             await self.voice_mgr.migrate_legacy_skin_directories(
-                self.download_langs,
+                self.plugin_config.auto_download_language,
             )
             await self.voice_mgr.refresh_local_skin_metadata()
             await self.voice_mgr.ensure_assets()
@@ -221,11 +201,11 @@ class MyPlugin(Star):
         async with self._scan_lock:
             current_time = time.monotonic()
 
-            if force or current_time - self._last_scan_time > SCAN_CACHE_DURATION:
+            if force or current_time - self._last_scan_time > constants.SCAN_CACHE_DURATION:
                 await asyncio.to_thread(self.voice_mgr.scan_voice_files)
                 self._last_scan_time = current_time
 
-                logger.debug(f"执行文件扫描，下次扫描时间: {SCAN_CACHE_DURATION}秒后")
+                logger.debug(f"执行文件扫描，下次扫描时间: {constants.SCAN_CACHE_DURATION}秒后")
 
     async def _repair_voice_mapping_if_needed(
         self,
@@ -280,7 +260,7 @@ class MyPlugin(Star):
         return (
             isinstance(trigger, str)
             and bool(trigger.strip())
-            and len(trigger.strip()) <= 64
+            and len(trigger.strip()) <= constants.MAX_TRIGGER_LENGTH
             and "\x00" not in trigger
         )
 
@@ -306,18 +286,61 @@ class MyPlugin(Star):
 
         return remaining
 
-    async def _get_list_render_data(self) -> dict:
-        """构建列表图片所需的数据。"""
-        await self._scan_if_needed()
+    def _avatar_path(self, base_character: str) -> str:
+        """取得基础角色头像的缓存路径。"""
+        return str(self.voice_mgr.assets_dir / f"{base_character}.png")
 
-        render_data = {
-            "custom_commands": [],
-            "operators": [],
-            "skin_operators": [],
-            "voice_types": self.voice_mgr.VOICE_DESCRIPTIONS,
-        }
+    def _language_items(self, languages: Iterable[str]) -> List[dict]:
+        """把语言代码列表转成渲染用的标签数据。"""
+        items = []
 
-        # 填充自定义指令
+        for lang_code in languages:
+            lang_conf = self.voice_mgr.LANGUAGE_MAP.get(
+                lang_code,
+                {
+                    "name": lang_code,
+                    "color": constants.UNKNOWN_LANGUAGE_COLOR,
+                },
+            )
+
+            items.append(
+                {
+                    "code": lang_code,
+                    "display": lang_conf["name"],
+                    "color": lang_conf["color"],
+                }
+            )
+
+        return items
+
+    def _binding_language_display(
+        self,
+        display_character: str,
+        lang_code: Optional[str],
+    ) -> str:
+        """生成自定义绑定卡片上的语言文案。"""
+        if lang_code:
+            lang_conf = self.voice_mgr.LANGUAGE_MAP.get(lang_code)
+            return lang_conf["name"] if lang_conf else lang_code
+
+        auto_code = self.voice_mgr.choose_language(
+            display_character,
+            self.plugin_config.default_language_rank,
+        )
+
+        if auto_code == "nodownload":
+            return "Auto(无)"
+
+        name = self.voice_mgr.LANGUAGE_MAP.get(
+            auto_code,
+            {},
+        ).get("name", auto_code)
+        return f"Auto({name})"
+
+    def _collect_custom_commands(self) -> List[dict]:
+        """收集自定义指令卡片数据。"""
+        cards = []
+
         for trigger, info in self.custom_mappings.items():
             if not isinstance(info, dict):
                 logger.warning(f"自定义指令格式错误: {trigger} -> {info}")
@@ -332,37 +355,26 @@ class MyPlugin(Star):
             )
             display_character = resolved_character or info["character"]
             base = self.voice_mgr._base_character(display_character)
-            lang_code = info.get("lang")
-            lang_display = "Auto"
 
-            if lang_code:
-                lang_conf = self.voice_mgr.LANGUAGE_MAP.get(lang_code)
-                lang_display = lang_conf["name"] if lang_conf else lang_code
-            else:
-                auto_code = self.voice_mgr.choose_language(
-                    display_character,
-                    self.default_lang_rank,
-                )
-
-                if auto_code == "nodownload":
-                    lang_display = "Auto(无)"
-                else:
-                    name = self.voice_mgr.LANGUAGE_MAP.get(
-                        auto_code,
-                        {},
-                    ).get("name", auto_code)
-                    lang_display = f"Auto({name})"
-
-            render_data["custom_commands"].append(
+            cards.append(
                 {
                     "trigger": trigger,
                     "target": (f"{display_character} · {info['voice']}"),
-                    "lang_display": lang_display,
-                    "avatar_path": str(self.voice_mgr.assets_dir / f"{base}.png"),
+                    "lang_display": self._binding_language_display(
+                        display_character,
+                        info.get("lang"),
+                    ),
+                    "avatar_path": self._avatar_path(base),
                 }
             )
 
-        # 填充干员及皮肤数据
+        return cards
+
+    def _collect_operator_cards(self) -> Tuple[List[dict], List[dict]]:
+        """收集干员与皮肤卡片数据，返回 (干员, 皮肤)。"""
+        operators: List[dict] = []
+        skin_operators: List[dict] = []
+
         for character, languages in self.voice_mgr.voice_index.items():
             parsed = self.voice_mgr._parse_character_reference(character)
 
@@ -376,39 +388,33 @@ class MyPlugin(Star):
             if is_skin and skin_id is None:
                 continue
 
-            lang_items = []
-
-            for lang_code in languages:
-                lang_conf = self.voice_mgr.LANGUAGE_MAP.get(
-                    lang_code,
-                    {
-                        "name": lang_code,
-                        "color": (100, 100, 100),
-                    },
-                )
-
-                lang_items.append(
-                    {
-                        "code": lang_code,
-                        "display": lang_conf["name"],
-                        "color": lang_conf["color"],
-                    }
-                )
-
             item = {
                 "name": (
                     f"{base}皮肤 · {skin_id}" if is_skin and skin_id else character
                 ),
-                "avatar_path": str(self.voice_mgr.assets_dir / f"{base}.png"),
-                "languages": lang_items,
+                "avatar_path": self._avatar_path(base),
+                "languages": self._language_items(languages),
             }
 
             if is_skin:
-                render_data["skin_operators"].append(item)
+                skin_operators.append(item)
             else:
-                render_data["operators"].append(item)
+                operators.append(item)
 
-        return render_data
+        return operators, skin_operators
+
+    async def _get_list_render_data(self) -> dict:
+        """构建列表图片所需的数据。"""
+        await self._scan_if_needed()
+
+        operators, skin_operators = self._collect_operator_cards()
+
+        return {
+            "custom_commands": self._collect_custom_commands(),
+            "operators": operators,
+            "skin_operators": skin_operators,
+            "voice_types": self.voice_mgr.VOICE_DESCRIPTIONS,
+        }
 
     # ================== 事件监听 ==================
 
@@ -457,7 +463,7 @@ class MyPlugin(Star):
         if not lang_code:
             lang_code = self.voice_mgr.choose_language(
                 character,
-                self.default_lang_rank,
+                self.plugin_config.default_language_rank,
             )
 
         if lang_code == "nodownload":
@@ -558,7 +564,7 @@ class MyPlugin(Star):
                 character,
                 all_names,
                 n=1,
-                cutoff=FUZZY_MATCH_THRESHOLD,
+                cutoff=constants.FUZZY_MATCH_THRESHOLD,
             )
 
             guessed_character = None
@@ -591,11 +597,11 @@ class MyPlugin(Star):
                     character = resolved_character
 
             if not guessed_character:
-                if not self.auto_download:
+                if not self.plugin_config.auto_download:
                     yield event.plain_result(f"未找到角色 {character} (自动下载已关闭)")
                     return
 
-                if not self.allow_public_auto_download and not event.is_admin():
+                if not self.plugin_config.allow_public_auto_download and not event.is_admin():
                     yield event.plain_result(
                         f"未找到角色 {character} "
                         "（普通用户自动下载已关闭，请联系管理员下载）"
@@ -606,8 +612,8 @@ class MyPlugin(Star):
 
                 success, message = await self.voice_mgr.fetch_character_voices(
                     character,
-                    self.auto_download_skin,
-                    self.download_langs,
+                    self.plugin_config.auto_download_skin,
+                    self.plugin_config.auto_download_language,
                 )
 
                 if not success:
@@ -646,7 +652,7 @@ class MyPlugin(Star):
         else:
             target_lang = self.voice_mgr.choose_language(
                 character,
-                self.default_lang_rank,
+                self.plugin_config.default_language_rank,
             )
 
         if target_lang == "nodownload":
@@ -761,7 +767,9 @@ class MyPlugin(Star):
         character = character.strip()
 
         if not self._valid_trigger(trigger):
-            yield event.plain_result("触发词不能为空且不能超过 64 个字符")
+            yield event.plain_result(
+                f"触发词不能为空且不能超过 {constants.MAX_TRIGGER_LENGTH} 个字符"
+            )
             return
 
         if not self.voice_mgr.validate_character(character):
@@ -805,7 +813,7 @@ class MyPlugin(Star):
 
         resolved_lang = lang_code or self.voice_mgr.choose_language(
             character,
-            self.default_lang_rank,
+            self.plugin_config.default_language_rank,
         )
 
         if resolved_lang != "nodownload":
@@ -981,7 +989,7 @@ class MyPlugin(Star):
             )
             yield event.plain_result(f"帮助生成失败: {exc}")
 
-    async def terminate(self):
+    async def terminate(self) -> None:
         """插件停用或重载时停止后台迁移与资源检查任务。"""
         voice_page = getattr(self, "voice_page", None)
 

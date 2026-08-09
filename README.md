@@ -1,13 +1,15 @@
 # 明日方舟角色语音插件 astrbot_plugin_mrfz
 
-## v3.7.2
+## v3.7.3
 
 这是一个支持明日方舟所有角色、所有皮肤、全语言语音的 AstrBot 插件。
 内置了 PRTS 终端风格的图片渲染引擎，支持模糊匹配和自定义语音绑定。
 
 ## 访问统计
 
-<a href="https://count.getloli.com/"><img src="https://count.getloli.com/get/@:astrbot_plugin_mrfz?theme=rule34"></a>
+<div align="center">
+  <a href="https://count.getloli.com/"><img src="https://count.getloli.com/get/@:astrbot_plugin_mrfz?theme=rule34"></a>
+</div>
 
 ## ✨ 功能特点
 
@@ -65,10 +67,13 @@ astrbot_plugin_mrfz/
 ├── data_source.py          # 数据源与下载逻辑
 ├── renderer.py             # 图片渲染模块
 ├── voice_page.py           # Pages 管理后端
+├── constants.py            # 全局常量（版本、限额、语言与资源映射）
+├── config.py               # 配置对象 PluginConfig
 ├── pages/voice-manager/    # 管理端前端
 ├── SourceHanSerifCN...otf  # 字体文件
 ├── _conf_schema.json       # WebUI 配置定义
-└── requirements.txt        # 依赖列表
+├── requirements.txt        # 依赖列表
+└── CHANGELOG.md            # 更新日志
 ```
 
 ### 2. 插件数据目录

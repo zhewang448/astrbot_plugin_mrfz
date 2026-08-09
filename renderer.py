@@ -9,6 +9,11 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
+# RGB / RGBA 颜色元组
+Color = Tuple[int, ...]
+# 多边形顶点列表
+Points = List[Tuple[int, int]]
+
 
 class VoiceRenderer:
     """Render the Rhodes-Island-style voice archive and help panels."""
@@ -33,9 +38,9 @@ class VoiceRenderer:
     GRID_GAP = 14
     GRID_COLS = 3
 
-    def __init__(self, font_path: str = None, output_dir: str = None):
+    def __init__(self, font_path: Optional[str] = None, output_dir: Optional[str] = None) -> None:
         self.font_path = font_path
-        self._font_cache = {}
+        self._font_cache: Dict[Tuple[int, bool, bool], ImageFont.FreeTypeFont] = {}
         self._font_bytes_cache: Dict[str, Optional[bytes]] = {}
         self.output_dir = Path(
             output_dir or Path(tempfile.gettempdir()) / "astrbot_plugin_mrfz"
@@ -112,7 +117,7 @@ class VoiceRenderer:
         self._font_bytes_cache[key] = data
         return data
 
-    def _load_font(self, size: int, *, bold: bool = False, mono: bool = False):
+    def _load_font(self, size: int, *, bold: bool = False, mono: bool = False) -> ImageFont.FreeTypeFont:
         cache_key = (size, bold, mono)
         if cache_key in self._font_cache:
             return self._font_cache[cache_key]
@@ -152,7 +157,7 @@ class VoiceRenderer:
             return False
 
     @staticmethod
-    def _new_rgba(size: Tuple[int, int], color=(0, 0, 0, 0)) -> Image.Image:
+    def _new_rgba(size: Tuple[int, int], color: Color = (0, 0, 0, 0)) -> Image.Image:
         return Image.new("RGBA", size, color)
 
     def _new_output_path(self, prefix: str) -> Path:
@@ -181,7 +186,7 @@ class VoiceRenderer:
             temp_path.unlink(missing_ok=True)
 
     @staticmethod
-    def _cut_box(x: int, y: int, width: int, height: int, cut: int = 12):
+    def _cut_box(x: int, y: int, width: int, height: int, cut: int = 12) -> Points:
         return [
             (x, y),
             (x + width - cut, y),
@@ -196,8 +201,8 @@ class VoiceRenderer:
         draw: ImageDraw.ImageDraw,
         box: Tuple[int, int, int, int],
         *,
-        fill,
-        outline=None,
+        fill: Color,
+        outline: Optional[Color] = None,
         cut: int = 12,
         width: int = 1,
     ) -> None:
@@ -207,7 +212,13 @@ class VoiceRenderer:
         if outline:
             draw.line(points + [points[0]], fill=outline, width=width, joint="curve")
 
-    def _fit_text(self, draw, text: str, font, max_width: float) -> str:
+    def _fit_text(
+        self,
+        draw: ImageDraw.ImageDraw,
+        text: str,
+        font: ImageFont.FreeTypeFont,
+        max_width: float,
+    ) -> str:
         text = str(text)
         if draw.textlength(text, font=font) <= max_width:
             return text
@@ -218,7 +229,7 @@ class VoiceRenderer:
 
     def _fit_font_and_text(
         self,
-        draw,
+        draw: ImageDraw.ImageDraw,
         text: str,
         max_width: float,
         *,
@@ -226,7 +237,7 @@ class VoiceRenderer:
         min_size: int,
         bold: bool = False,
         mono: bool = False,
-    ):
+    ) -> Tuple[ImageFont.FreeTypeFont, str]:
         """Shrink text to the requested minimum before applying an ellipsis."""
         text = str(text)
 
@@ -277,7 +288,14 @@ class VoiceRenderer:
             draw.line((x, y, x + sx * mark, y), fill=self.COLOR_MUTED, width=2)
             draw.line((x, y, x, y + sy * mark), fill=self.COLOR_MUTED, width=2)
 
-    def _draw_hazard(self, draw, x: int, y: int, width: int, height: int) -> None:
+    def _draw_hazard(
+        self,
+        draw: ImageDraw.ImageDraw,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> None:
         draw.rectangle((x, y, x + width, y + height), fill=self.COLOR_YELLOW)
         stripe = 18
         # Draw the diagonal bands scanline by scanline so they are clipped to
@@ -298,7 +316,14 @@ class VoiceRenderer:
                         width=1,
                     )
 
-    def _draw_header(self, draw, width: int, *, page_code: str, title: str) -> int:
+    def _draw_header(
+        self,
+        draw: ImageDraw.ImageDraw,
+        width: int,
+        *,
+        page_code: str,
+        title: str,
+    ) -> int:
         left = self.PAGE_MARGIN
         right = width - self.PAGE_MARGIN
 
@@ -367,7 +392,7 @@ class VoiceRenderer:
 
     def _draw_section_header(
         self,
-        draw,
+        draw: ImageDraw.ImageDraw,
         y: int,
         number: int,
         title_cn: str,
@@ -471,7 +496,13 @@ class VoiceRenderer:
         avatar.putalpha(ImageChops.multiply(avatar.getchannel("A"), mask))
         image.alpha_composite(avatar, (x, y))
 
-    def _draw_language_tags(self, draw, x: int, y: int, languages: List[Dict]) -> None:
+    def _draw_language_tags(
+        self,
+        draw: ImageDraw.ImageDraw,
+        x: int,
+        y: int,
+        languages: List[Dict],
+    ) -> None:
         for index, language in enumerate(languages[:6]):
             label = str(language.get("display", "--"))[:2]
             raw_color = language.get("color", self.COLOR_MUTED)
@@ -498,7 +529,7 @@ class VoiceRenderer:
     def _draw_operator_card(
         self,
         image: Image.Image,
-        draw,
+        draw: ImageDraw.ImageDraw,
         item: Dict,
         x: int,
         y: int,
@@ -606,7 +637,7 @@ class VoiceRenderer:
     def _draw_custom_card(
         self,
         image: Image.Image,
-        draw,
+        draw: ImageDraw.ImageDraw,
         item: Dict,
         x: int,
         y: int,
@@ -690,7 +721,13 @@ class VoiceRenderer:
         left = self.PAGE_MARGIN
         content_width = width - self.PAGE_MARGIN * 2
 
-        def draw_micro_label(x, y, text, *, color=None):
+        def draw_micro_label(
+            x: int,
+            y: int,
+            text: str,
+            *,
+            color: Optional[Color] = None,
+        ) -> None:
             draw.text(
                 (x, y),
                 text,
@@ -698,7 +735,13 @@ class VoiceRenderer:
                 fill=color or self.COLOR_SUB,
             )
 
-        def draw_status_light(x, y, label, *, active=True):
+        def draw_status_light(
+            x: int,
+            y: int,
+            label: str,
+            *,
+            active: bool = True,
+        ) -> None:
             color = self.COLOR_CYAN if active else self.COLOR_MUTED
             draw.ellipse((x, y + 2, x + 9, y + 11), fill=color)
             draw.text(
@@ -709,16 +752,16 @@ class VoiceRenderer:
             )
 
         def draw_command_card(
-            x,
-            y,
-            card_width,
-            number,
-            command,
-            description,
-            example,
+            x: int,
+            y: int,
+            card_width: int,
+            number: int,
+            command: str,
+            description: str,
+            example: str,
             *,
-            admin=False,
-        ):
+            admin: bool = False,
+        ) -> None:
             card_height = 178
             self._draw_cut_panel(
                 draw,
@@ -1130,7 +1173,15 @@ class VoiceRenderer:
         current_y = 190
         section_no = 1
 
-        def draw_grid_section(items, cn, en, card_height, *, custom=False, skin=False):
+        def draw_grid_section(
+            items: List[Dict],
+            cn: str,
+            en: str,
+            card_height: int,
+            *,
+            custom: bool = False,
+            skin: bool = False,
+        ) -> None:
             nonlocal current_y, section_no
             if not items:
                 return
@@ -1224,7 +1275,12 @@ class VoiceRenderer:
         output_path = self._save_output(image.convert("RGB"), "list")
         return str(output_path.absolute())
 
-    def _draw_footer(self, draw, width: int, height: int) -> None:
+    def _draw_footer(
+        self,
+        draw: ImageDraw.ImageDraw,
+        width: int,
+        height: int,
+    ) -> None:
         y = height - 58
         left = self.PAGE_MARGIN
         right = width - self.PAGE_MARGIN
