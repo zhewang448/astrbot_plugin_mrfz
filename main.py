@@ -738,6 +738,39 @@ class MyPlugin(Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
+        "mrfz_alias",
+        alias={"添加干员别称", "干员别称"},
+    )
+    async def mrfz_alias(
+        self,
+        event: AstrMessageEvent,
+        alias: str,
+        character: str,
+    ):
+        """添加干员别称，例如：/mrfz_alias 水陈 假日威龙陈。"""
+        alias = alias.strip()
+        character = character.strip()
+        success, message = self.voice_mgr.add_operator_alias(alias, character)
+        yield event.plain_result(message)
+
+    @filter.command(
+        "mrfz_alias_list",
+        alias={"干员别称列表"},
+    )
+    async def mrfz_alias_list(
+        self,
+        event: AstrMessageEvent,
+    ):
+        """查看当前已加载的干员别称。"""
+        aliases = self.voice_mgr.operator_aliases
+        if not aliases:
+            yield event.plain_result("当前没有配置干员别称")
+            return
+        lines = [f"{alias} -> {character}" for alias, character in sorted(aliases.items())]
+        yield event.plain_result("干员别称列表：\n" + "\n".join(lines))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command(
         "mrfz_bind",
         alias={
             "绑定语音",

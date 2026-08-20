@@ -1293,6 +1293,19 @@ td strong {
   background: var(--red);
 }
 
+.alias-source {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 7px;
+  border: 1px solid var(--line-strong);
+  color: var(--accent);
+  font: 700 9px/1 "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+}
+
+.alias-source.is-custom {
+  color: var(--green);
+}
+
 .recovery-grid {
   display: grid;
   grid-template-columns: 1.2fr 0.8fr;

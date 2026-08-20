@@ -60,8 +60,12 @@
             <span class="nav-code">05</span>
             <span><b>快捷绑定</b><small>Quick Bindings</small></span>
           </button>
-          <button class="nav-item" data-view="recovery">
+          <button class="nav-item" data-view="aliases">
             <span class="nav-code">06</span>
+            <span><b>干员别称</b><small>Operator Aliases</small></span>
+          </button>
+          <button class="nav-item" data-view="recovery">
+            <span class="nav-code">07</span>
             <span><b>恢复与审计</b><small>Recovery & Audit</small></span>
           </button>
         </nav>
@@ -279,10 +283,34 @@
           </article>
         </section>
 
+        <section class="view" id="view-aliases" data-view-panel="aliases">
+          <div class="page-heading compact">
+            <div>
+              <p class="eyebrow">OPERATOR ALIASES / 06</p>
+              <h2>干员别称</h2>
+              <p>管理聊天命令中的干员简称；保存后立即用于播放、下载和语音绑定。</p>
+            </div>
+            <button class="button button-primary" id="alias-new">新增别称</button>
+          </div>
+          <article class="panel">
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>别称</th><th>标准干员名</th><th>来源</th><th></th></tr></thead>
+                <tbody id="alias-list"></tbody>
+              </table>
+            </div>
+            <div class="empty-state is-hidden" id="alias-empty">
+              <div class="empty-glyph">⌁</div>
+              <h3>还没有干员别称</h3>
+              <p>新建后可在聊天中直接用别称查询、下载或绑定语音。</p>
+            </div>
+          </article>
+        </section>
+
         <section class="view" id="view-recovery" data-view-panel="recovery">
           <div class="page-heading compact">
             <div>
-              <p class="eyebrow">RECOVERY & AUDIT / 06</p>
+              <p class="eyebrow">RECOVERY & AUDIT / 07</p>
               <h2>恢复与审计</h2>
               <p>回收站支持恢复；永久删除需要二次确认，所有管理操作都会记录。</p>
             </div>

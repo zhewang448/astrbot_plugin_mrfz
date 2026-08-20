@@ -189,6 +189,19 @@ class VoicePageManager:
                 ["POST"],
                 "Remove a voice binding",
             ),
+            ("/aliases", self.aliases, ["GET"], "List operator aliases"),
+            (
+                "/aliases/save",
+                self.save_alias,
+                ["POST"],
+                "Create or update an operator alias",
+            ),
+            (
+                "/aliases/remove",
+                self.remove_alias,
+                ["POST"],
+                "Remove an operator alias",
+            ),
             ("/audit", self.audit, ["GET"], "Read Page audit records"),
         ]
 
@@ -2454,6 +2467,67 @@ class VoicePageManager:
 
         await self._audit("remove_binding", trigger)
         return json_response({"removed": True, "trigger": trigger})
+
+    async def aliases(self):
+        """返回内置及自定义干员别称。"""
+        builtin = constants.OPERATOR_ALIAS
+        items = [
+            {
+                "alias": alias,
+                "character": character,
+                "builtin": alias in builtin,
+            }
+            for alias, character in sorted(
+                self.voice_mgr.operator_aliases.items(),
+                key=lambda item: (
+                    0 if item[0] == "白咕咕" else 1,
+                    item[1].casefold(),
+                    item[0].casefold(),
+                ),
+            )
+        ]
+        return json_response({"items": items})
+
+    async def save_alias(self):
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求格式无效")
+
+        alias = str(payload.get("alias", "")).strip()
+        character = str(payload.get("character", "")).strip()
+        try:
+            async with self._mutation_lock:
+                success, message = self.voice_mgr.add_operator_alias(alias, character)
+            if not success:
+                raise ValueError(message)
+            await self._audit(
+                "save_alias",
+                alias,
+                details={"alias": alias, "character": self.voice_mgr.operator_aliases[alias]},
+            )
+            return json_response(
+                {
+                    "saved": True,
+                    "alias": alias,
+                    "character": self.voice_mgr.operator_aliases[alias],
+                    "builtin": alias in constants.OPERATOR_ALIAS,
+                }
+            )
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+
+    async def remove_alias(self):
+        payload = await request.json(default={})
+        alias = str(payload.get("alias", "")).strip() if isinstance(payload, dict) else ""
+        try:
+            async with self._mutation_lock:
+                success, message = self.voice_mgr.remove_operator_alias(alias)
+            if not success:
+                raise ValueError(message)
+            await self._audit("remove_alias", alias)
+            return json_response({"removed": True, "alias": alias, "message": message})
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
 
     async def audit(self):
         limit = request.query.get("limit", 100, type=int)

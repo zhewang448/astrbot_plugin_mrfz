@@ -55,6 +55,9 @@ class VoiceManager:
         self.plugin_dir = Path(plugin_dir)
         self.voices_dir = self.data_dir / "voices"
         self.assets_dir = self.data_dir / "assets"
+        self.operator_alias_file = self.data_dir / "operator_aliases.json"
+        self.operator_aliases: Dict[str, str] = dict(constants.OPERATOR_ALIAS)
+        self._custom_operator_aliases: Dict[str, str] = {}
 
         # 兼容原 main.py。
         self.voice_index: Dict[
@@ -103,7 +106,119 @@ class VoiceManager:
             )
 
         self._load_skin_metadata()
+        self._load_operator_aliases()
         self.scan_voice_files()
+
+    def _load_operator_aliases(self) -> None:
+        """加载用户自定义别称，并保留内置别称作为默认值。"""
+        if not self.operator_alias_file.is_file():
+            return
+        try:
+            with self.operator_alias_file.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if not isinstance(payload, dict):
+                return
+            for alias, character in payload.items():
+                if (
+                    isinstance(alias, str)
+                    and isinstance(character, str)
+                    and self._is_safe_component(alias, self.MAX_CHARACTER_LENGTH)
+                    and self._is_safe_component(character, self.MAX_CHARACTER_LENGTH)
+                ):
+                    alias = alias.strip()
+                    character = character.strip()
+                    self._custom_operator_aliases[alias] = character
+                    self.operator_aliases[alias] = character
+        except (OSError, json.JSONDecodeError):
+            logger.warning(f"读取干员别称文件失败: {self.operator_alias_file}")
+
+    def _save_operator_aliases(self) -> bool:
+        """原子保存用户自定义别称。"""
+        temp_path = self.operator_alias_file.with_name(
+            f".{self.operator_alias_file.name}.tmp"
+        )
+        try:
+            with temp_path.open("w", encoding="utf-8") as handle:
+                json.dump(
+                    self._custom_operator_aliases,
+                    handle,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                handle.flush()
+            temp_path.replace(self.operator_alias_file)
+            return True
+        except OSError as exc:
+            logger.error(f"保存干员别称失败: {exc}")
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return False
+
+    def resolve_operator_alias(self, character: str) -> str:
+        """按原样或忽略大小写解析干员别称，最多展开一层。"""
+        value = character.strip()
+        if value in self.operator_aliases:
+            return self.operator_aliases[value]
+        folded = value.casefold()
+        for alias, target in self.operator_aliases.items():
+            if alias.casefold() == folded:
+                return target
+        return value
+
+    def add_operator_alias(self, alias: str, character: str) -> Tuple[bool, str]:
+        """添加并持久化一个干员别称。"""
+        alias = alias.strip()
+        character = self.resolve_operator_alias(character)
+        if not self._is_safe_component(alias, self.MAX_CHARACTER_LENGTH):
+            return False, "别称不能为空，且不能包含路径或特殊字符"
+        if not self._is_safe_component(character, self.MAX_CHARACTER_LENGTH):
+            return False, "干员名称不合法"
+        if alias == character:
+            return False, "别称不能与干员标准名相同"
+        previous = self.operator_aliases.get(alias)
+        previous_custom = self._custom_operator_aliases.get(alias)
+        self.operator_aliases[alias] = character
+        self._custom_operator_aliases[alias] = character
+        if not self._save_operator_aliases():
+            if previous is None:
+                self.operator_aliases.pop(alias, None)
+            else:
+                self.operator_aliases[alias] = previous
+            if previous_custom is None:
+                self._custom_operator_aliases.pop(alias, None)
+            else:
+                self._custom_operator_aliases[alias] = previous_custom
+            return False, "别称保存失败，请检查数据目录权限"
+        return True, f"已添加干员别称: {alias} -> {character}"
+
+    def remove_operator_alias(self, alias: str) -> Tuple[bool, str]:
+        """删除自定义别称；内置别称删除后恢复默认映射。"""
+        alias = alias.strip()
+        if alias not in self.operator_aliases:
+            return False, "干员别称不存在"
+
+        previous = self.operator_aliases[alias]
+        previous_custom = self._custom_operator_aliases.get(alias)
+        if alias in constants.OPERATOR_ALIAS:
+            self.operator_aliases[alias] = constants.OPERATOR_ALIAS[alias]
+            self._custom_operator_aliases.pop(alias, None)
+            message = f"已恢复内置干员别称: {alias} -> {self.operator_aliases[alias]}"
+        else:
+            self.operator_aliases.pop(alias, None)
+            self._custom_operator_aliases.pop(alias, None)
+            message = f"已删除干员别称: {alias}"
+
+        if not self._save_operator_aliases():
+            # 保存失败时恢复内存状态，避免页面与运行时不一致。
+            self.operator_aliases[alias] = previous
+            if previous_custom is None:
+                self._custom_operator_aliases.pop(alias, None)
+            else:
+                self._custom_operator_aliases[alias] = previous_custom
+            return False, "别称保存失败，请检查数据目录权限"
+        return True, message
 
     def _load_skin_metadata(self) -> None:
         index_path = self.data_dir / "voice_index.json"
@@ -540,10 +655,13 @@ class VoiceManager:
             return None, []
 
         base_character, is_skin, selector = parsed
+        canonical_base = self.resolve_operator_alias(base_character)
+        alias_used = canonical_base != base_character
+        base_character = canonical_base
 
         if not is_skin:
             reference = base_character
-            if reference in self.voice_index:
+            if reference in self.voice_index or alias_used:
                 return reference, []
 
             # 兼容直接输入皮肤展示名，例如“超新星”，无需再输入
@@ -826,10 +944,14 @@ class VoiceManager:
         if language is not None and language not in self.LANGUAGE_MAP:
             return []
 
-        languages = self.voice_files.get(
-            character.strip(),
-            {},
+        base_character, is_skin, _ = parsed
+        base_character = self.resolve_operator_alias(base_character)
+        reference = (
+            f"{base_character}皮肤[{parsed[2]}]"
+            if is_skin and parsed[2]
+            else base_character
         )
+        languages = self.voice_files.get(reference, {})
 
         if language:
             return list(
@@ -871,6 +993,7 @@ class VoiceManager:
             is_skin,
             skin_id,
         ) = parsed
+        base_character = self.resolve_operator_alias(base_character)
 
         character_root = self._safe_path(
             self.voices_dir,
@@ -1161,7 +1284,7 @@ class VoiceManager:
         if not parsed:
             return False
 
-        base_character = parsed[0]
+        base_character = self.resolve_operator_alias(parsed[0])
 
         if language is not None:
             return (base_character, language) in self._voice_remap_pending
@@ -1184,7 +1307,7 @@ class VoiceManager:
         if not parsed:
             return False, "角色名称不合法"
 
-        base_character = parsed[0]
+        base_character = self.resolve_operator_alias(parsed[0])
 
         valid_ranks = {item["rank"] for item in self.LANGUAGE_MAP.values()}
         selected_ranks = {rank for rank in str(download_langs) if rank in valid_ranks}
@@ -1608,7 +1731,7 @@ class VoiceManager:
                 "角色名称不合法",
             )
 
-        base_character = parsed[0]
+        base_character = self.resolve_operator_alias(parsed[0])
 
         if lang not in self.LANGUAGE_MAP or filename not in self.VOICE_DESCRIPTIONS:
             return (
@@ -1841,7 +1964,7 @@ class VoiceManager:
         if not parsed:
             return None
 
-        base_character = parsed[0]
+        base_character = self.resolve_operator_alias(parsed[0])
         encoded_character = quote(
             base_character,
             safe="",
@@ -1961,7 +2084,7 @@ class VoiceManager:
                 if not parsed:
                     continue
 
-                base_character = parsed[0]
+                base_character = self.resolve_operator_alias(parsed[0])
                 avatar_path = self.assets_dir / f"{base_character}.png"
 
                 if not self._is_valid_png_file(avatar_path):
@@ -2008,7 +2131,7 @@ class VoiceManager:
                 "角色名称不合法",
             )
 
-        base_char = parsed[0]
+        base_char = self.resolve_operator_alias(parsed[0])
         encoded_character = quote(
             base_char,
             safe="",
