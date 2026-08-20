@@ -148,6 +148,7 @@ function switchView(view) {
   if (view === "tasks") loadTasks();
   if (view === "integrity") loadIntegrity();
   if (view === "bindings") loadBindings();
+  if (view === "aliases") loadAliases();
   if (view === "recovery") loadRecovery();
 }
 
@@ -194,6 +195,8 @@ function auditActionLabel(action) {
     export_archive: "导出语音包",
     save_binding: "保存快捷绑定",
     remove_binding: "删除快捷绑定",
+    save_alias: "保存干员别称",
+    remove_alias: "删除干员别称",
     task_completed: "后台任务完成",
     task_failed: "后台任务失败",
     task_cancelled: "后台任务取消",
@@ -887,6 +890,91 @@ async function removeBinding(trigger) {
   await loadBindings();
 }
 
+async function loadAliases() {
+  const data = await run(() => bridge.apiGet("page/aliases"));
+  const items = data.items || [];
+  $("#alias-empty").classList.toggle("is-hidden", items.length > 0);
+  $("#alias-list").innerHTML = items
+    .map(
+      (item) => `
+        <tr>
+          <td><strong>${escapeHtml(item.alias)}</strong></td>
+          <td>${escapeHtml(item.character)}</td>
+          <td><span class="alias-source ${item.builtin ? "" : "is-custom"}">${
+            item.builtin ? "内置" : "自定义"
+          }</span></td>
+          <td>
+            <div class="table-actions">
+              <button class="button button-small button-secondary" data-edit-alias="${escapeHtml(
+                item.alias,
+              )}">编辑</button>
+              <button class="button button-small button-warning" data-remove-alias="${escapeHtml(
+                item.alias,
+              )}">${item.builtin ? "恢复默认" : "删除"}</button>
+            </div>
+          </td>
+        </tr>
+      `,
+    )
+    .join("");
+  $("#alias-list").dataset.items = JSON.stringify(items);
+}
+
+async function aliasModal(existing = null) {
+  const modal = $("#modal");
+  $("#modal-eyebrow").textContent = existing ? "EDIT OPERATOR ALIAS" : "NEW OPERATOR ALIAS";
+  $("#modal-title").textContent = existing ? "编辑干员别称" : "新增干员别称";
+  $("#modal-message").textContent = "别称立即用于播放、下载和快捷绑定；标准干员名可直接填写。";
+  $("#modal-fields").innerHTML = `
+    <label><span>别称</span><input id="modal-alias" maxlength="80" value="${escapeHtml(
+      existing?.alias || "",
+    )}" ${existing ? "readonly" : ""} /></label>
+    <label><span>标准干员名</span><input id="modal-alias-character" maxlength="80" value="${escapeHtml(
+      existing?.character || "",
+    )}" /></label>
+  `;
+  $("#modal-confirm").className = "button button-primary";
+  $("#modal-confirm").textContent = "保存别称";
+  modal.returnValue = "";
+  modal.showModal();
+  const confirmed = await new Promise((resolve) => {
+    const onClose = () => {
+      modal.removeEventListener("close", onClose);
+      resolve(modal.returnValue === "confirm");
+    };
+    modal.addEventListener("close", onClose);
+  });
+  $("#modal-confirm").textContent = "确认";
+  if (!confirmed) return;
+  await run(
+    () =>
+      bridge.apiPost("page/aliases/save", {
+        alias: $("#modal-alias").value.trim(),
+        character: $("#modal-alias-character").value.trim(),
+      }),
+    { success: "干员别称已保存" },
+  );
+  await loadAliases();
+}
+
+async function removeAlias(item) {
+  if (!item) return;
+  const confirmed = await modalConfirm({
+    eyebrow: item.builtin ? "RESTORE BUILTIN ALIAS" : "REMOVE OPERATOR ALIAS",
+    title: item.builtin ? `恢复“${item.alias}”的内置映射` : `删除“${item.alias}”`,
+    message: item.builtin
+      ? `会恢复为默认映射：${item.alias} -> ${item.character}`
+      : "删除后，该别称将不再被识别。",
+    danger: true,
+  });
+  if (!confirmed) return;
+  await run(
+    () => bridge.apiPost("page/aliases/remove", { alias: item.alias }),
+    { success: item.builtin ? "已恢复内置别称" : "干员别称已删除" },
+  );
+  await loadAliases();
+}
+
 function renderTrash(items) {
   $("#trash-count").textContent = items.length;
   $("#trash-empty").classList.toggle("is-hidden", items.length > 0);
@@ -1107,6 +1195,18 @@ function bindEvents() {
       await bindingModal(items.find((item) => item.trigger === edit.dataset.editBinding));
     }
     if (remove) await removeBinding(remove.dataset.removeBinding);
+  });
+  $("#alias-new").addEventListener("click", () => aliasModal());
+  $("#alias-list").addEventListener("click", async (event) => {
+    const edit = event.target.closest("[data-edit-alias]");
+    const remove = event.target.closest("[data-remove-alias]");
+    const items = JSON.parse($("#alias-list").dataset.items || "[]");
+    if (edit) {
+      await aliasModal(items.find((item) => item.alias === edit.dataset.editAlias));
+    }
+    if (remove) {
+      await removeAlias(items.find((item) => item.alias === remove.dataset.removeAlias));
+    }
   });
   $("#trash-list").addEventListener("click", async (event) => {
     const restore = event.target.closest("[data-restore]");
