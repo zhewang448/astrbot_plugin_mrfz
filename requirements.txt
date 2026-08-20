@@ -1,3 +1,4 @@
 aiohttp
+Brotli>=1.2
 beautifulsoup4
 Pillow

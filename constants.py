@@ -256,4 +256,6 @@ DEFAULT_HEADERS = {
         "image/avif,image/webp,*/*;q=0.8"
     ),
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    # Avoid Brotli responses because some local aiohttp runtimes cannot decode them.
+    "Accept-Encoding": "gzip, deflate",
 }
