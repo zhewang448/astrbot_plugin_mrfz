@@ -235,6 +235,7 @@ function renderOverview(data) {
     statCard("AUDIO", "WAV 文件", storage.wavFiles, `${data.voiceTypes} 类语音定义`, "≋"),
     statCard("TASK", "运行任务", data.runningTasks, `${data.bindings} 条快捷绑定`, "↻"),
   ].join("");
+  if (data.version) $(".version-chip").textContent = `v${data.version}`;
   $("#storage-size").textContent = formatBytes(storage.bytes);
   $("#storage-legend").innerHTML = `
     <div><i></i><span>本地 WAV</span><b>${escapeHtml(storage.wavFiles || 0)}</b></div>

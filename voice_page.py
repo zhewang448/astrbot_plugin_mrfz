@@ -25,6 +25,8 @@ from astrbot.api.web import (
     request,
 )
 
+from PIL import Image as PILImage
+
 from . import constants
 
 
@@ -58,6 +60,7 @@ class VoicePageManager:
         default_language_rank: str,
         default_download_langs: str,
         default_download_skin: bool,
+        page_style: str = "modern",
     ) -> None:
         self.context = context
         self.voice_mgr = voice_mgr
@@ -68,6 +71,7 @@ class VoicePageManager:
         self.default_language_rank = str(default_language_rank)
         self.default_download_langs = str(default_download_langs)
         self.default_download_skin = bool(default_download_skin)
+        self.page_style = "classic" if page_style == "classic" else "modern"
 
         self.data_dir = Path(self.voice_mgr.data_dir)
         self.voices_dir = Path(self.voice_mgr.voices_dir)
@@ -77,6 +81,7 @@ class VoicePageManager:
         self.export_dir = self.page_dir / "exports"
         self.upload_dir = self.page_dir / "uploads"
         self.preview_dir = self.page_dir / "previews"
+        self.avatar_thumb_dir = self.page_dir / "avatar_thumbs"
         self.audit_file = self.page_dir / "audit.jsonl"
         self.integrity_file = self.page_dir / "integrity_report.json"
 
@@ -87,6 +92,7 @@ class VoicePageManager:
             self.export_dir,
             self.upload_dir,
             self.preview_dir,
+            self.avatar_thumb_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
@@ -98,12 +104,16 @@ class VoicePageManager:
         self._task_handles: Dict[str, asyncio.Task] = {}
         self._operation_previews: Dict[str, dict] = {}
         self._latest_integrity: dict = self._load_integrity_report()
+        # (扫描代次, 数据)：文件变动都会触发重新扫描，代次变化即缓存失效。
+        self._archives_cache: Optional[tuple[int, list[dict]]] = None
+        self._storage_cache: Optional[tuple[int, tuple[int, int]]] = None
         self._cleanup_operation_previews(remove_orphans=True)
         self._cleanup_orphan_uploads()
         self._register_routes()
 
     def _register_routes(self) -> None:
         routes = [
+            ("/ui", self.ui, ["GET"], "Voice page UI preferences"),
             ("/overview", self.overview, ["GET"], "Voice archive overview"),
             ("/archives", self.archives, ["GET"], "List voice archives"),
             ("/archive", self.archive_detail, ["GET"], "Voice archive details"),
@@ -203,6 +213,9 @@ class VoicePageManager:
                 "Remove an operator alias",
             ),
             ("/audit", self.audit, ["GET"], "Read Page audit records"),
+            ("/operators", self.operators, ["GET"], "List PRTS operators"),
+            ("/avatars", self.avatars, ["GET"], "Operator avatar thumbnails"),
+            ("/voice-text", self.voice_text, ["GET"], "Voice lines from PRTS"),
         ]
 
         for suffix, handler, methods, description in routes:
@@ -665,27 +678,18 @@ class VoicePageManager:
             own_voice_count += len(voices)
 
         if archive_root is not None and archive_root.is_dir():
-            try:
-                if is_skin:
-                    paths = archive_root.rglob("*.wav")
-                else:
-                    paths = (
-                        path
-                        for language in self.voice_mgr.LANGUAGE_MAP
-                        for path in (archive_root / language).glob("*.wav")
-                    )
+            if is_skin:
+                roots = [(archive_root, 2)]
+            else:
+                roots = [
+                    (archive_root / language, 0)
+                    for language in self.voice_mgr.LANGUAGE_MAP
+                ]
 
-                for path in paths:
-                    if not path.is_file() or not self._path_within(
-                        path,
-                        archive_root,
-                    ):
-                        continue
-                    stat = path.stat()
+            for root, depth in roots:
+                for stat in self._iter_wav_stats(root, depth):
                     total_bytes += stat.st_size
                     latest_mtime = max(latest_mtime, stat.st_mtime)
-            except OSError:
-                pass
 
         languages = list(self.voice_mgr.voice_index.get(character, []))
         playable_voice_count = sum(
@@ -719,7 +723,46 @@ class VoicePageManager:
             ),
         }
 
+    @staticmethod
+    def _iter_wav_stats(directory: Path, depth: int):
+        """遍历目录下的 WAV 并给出 stat，最多向下 depth 层子目录。
+
+        不跟随符号链接，因此结果一定位于 directory 内，无需逐个 resolve()。
+        Windows 上 DirEntry.stat() 直接来自目录枚举结果，不额外访问磁盘。
+        """
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            if depth > 0:
+                                yield from VoicePageManager._iter_wav_stats(
+                                    Path(entry.path),
+                                    depth - 1,
+                                )
+                        elif entry.name.lower().endswith(".wav") and entry.is_file(
+                            follow_symlinks=False
+                        ):
+                            yield entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+        except OSError:
+            return
+
     def _all_archives(self) -> list[dict]:
+        """所有档案的汇总，按扫描代次缓存；调用方不要修改返回的字典。"""
+        generation = self.voice_mgr.scan_generation
+
+        if self._archives_cache and self._archives_cache[0] == generation:
+            return self._archives_cache[1]
+
+        result = self._build_all_archives()
+        self._archives_cache = (generation, result)
+        return result
+
+    def _build_all_archives(self) -> list[dict]:
         result = []
 
         for character in sorted(self.voice_mgr.voice_files):
@@ -747,21 +790,20 @@ class VoicePageManager:
         return result
 
     def _storage_stats(self) -> dict:
-        total_bytes = 0
-        wav_files = 0
+        generation = self.voice_mgr.scan_generation
 
-        try:
-            paths = self.voices_dir.rglob("*.wav")
-        except OSError:
-            paths = []
+        if self._storage_cache and self._storage_cache[0] == generation:
+            total_bytes, wav_files = self._storage_cache[1]
+        else:
+            total_bytes = 0
+            wav_files = 0
 
-        for path in paths:
-            try:
-                if path.is_file() and self._path_within(path, self.voices_dir):
-                    wav_files += 1
-                    total_bytes += path.stat().st_size
-            except OSError:
-                continue
+            # 语音树为 角色/语言/*.wav 与 角色/skin/目录/语言/*.wav，最深四层。
+            for stat in self._iter_wav_stats(self.voices_dir, 4):
+                wav_files += 1
+                total_bytes += stat.st_size
+
+            self._storage_cache = (generation, (total_bytes, wav_files))
 
         trash_items = len(self._list_trash_items())
         return {
@@ -863,6 +905,9 @@ class VoicePageManager:
                 "recentAudit": self._read_audit(8),
             }
         )
+
+    async def ui(self):
+        return json_response({"style": self.page_style})
 
     async def archives(self):
         await self.scan_callback(False)
@@ -1967,8 +2012,9 @@ class VoicePageManager:
         kind: str,
         target: str,
         username: str,
-        runner: Callable[[], Awaitable[dict]],
+        runner: Callable[[dict], Awaitable[dict]],
     ) -> dict:
+        """runner 接收任务记录，可以写入 record["progress"] 与 record["message"]。"""
         task_id = uuid4().hex
         record = {
             "id": task_id,
@@ -1979,6 +2025,7 @@ class VoicePageManager:
             "startedAt": None,
             "finishedAt": None,
             "message": "等待执行",
+            "progress": None,
             "result": None,
         }
         self._tasks[task_id] = record
@@ -1989,7 +2036,7 @@ class VoicePageManager:
             record["message"] = "正在执行"
 
             try:
-                result = await runner()
+                result = await runner(record)
                 record["result"] = result
                 record["status"] = "completed"
                 record["message"] = str(result.get("message", "已完成"))
@@ -2167,12 +2214,19 @@ class VoicePageManager:
         include_skin = operation["includeSkin"]
         username = request.username or "dashboard"
 
-        async def runner() -> dict:
+        async def runner(record: dict) -> dict:
+            def report(done: int, total: int, label: str) -> None:
+                record["progress"] = {"done": done, "total": total}
+                record["message"] = f"正在下载 {label}"
+
+            record["message"] = "正在读取 PRTS 语音记录"
+
             async with self._fetch_semaphore:
                 success, message = await self.voice_mgr.fetch_character_voices(
                     character,
                     include_skin,
                     languages,
+                    progress=report,
                 )
 
             await self.scan_callback(True)
@@ -2316,7 +2370,8 @@ class VoicePageManager:
         )
         username = request.username or "dashboard"
 
-        async def runner() -> dict:
+        async def runner(record: dict) -> dict:
+            record["message"] = "正在检查本地 WAV"
             report = await asyncio.to_thread(
                 self._run_integrity,
                 quarantine,
@@ -2528,6 +2583,129 @@ class VoicePageManager:
             return json_response({"removed": True, "alias": alias, "message": message})
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
+
+    async def operators(self):
+        """PRTS 干员列表，并标出本地已有基础语音的干员。"""
+        refresh = str(request.query.get("refresh", "")).strip() in {"1", "true"}
+        catalog = await self.voice_mgr.get_operator_catalog(force_refresh=refresh)
+        local = {
+            character
+            for character in self.voice_mgr.voice_files
+            if (parsed := self.voice_mgr._parse_character_reference(character))
+            and not parsed[1]
+        }
+        items = [
+            {
+                "name": item["name"],
+                "addedAt": item.get("addedAt") or None,
+                "local": item["name"] in local,
+            }
+            for item in catalog.get("items", [])
+        ]
+        fetched_at = catalog.get("fetchedAt")
+        return json_response(
+            {
+                "items": items,
+                "fetchedAt": (
+                    datetime.fromtimestamp(fetched_at, timezone.utc).isoformat(
+                        timespec="seconds"
+                    )
+                    if fetched_at
+                    else None
+                ),
+                "stale": bool(catalog.get("stale")),
+                "error": catalog.get("error"),
+            }
+        )
+
+    def _avatar_thumbnail(self, character: str) -> Optional[str]:
+        """返回头像缩略图的 data URL；源头像不存在时返回 None。"""
+        if not self.voice_mgr._is_safe_component(
+            character,
+            self.voice_mgr.MAX_CHARACTER_LENGTH,
+        ):
+            return None
+
+        source = self.voice_mgr.assets_dir / f"{character}.png"
+        thumb = self.avatar_thumb_dir / f"{character}.webp"
+
+        try:
+            source_stat = source.stat()
+        except OSError:
+            return None
+
+        try:
+            stale = thumb.stat().st_mtime < source_stat.st_mtime
+        except OSError:
+            stale = True
+
+        if stale:
+            try:
+                with PILImage.open(source) as image:
+                    image = image.convert("RGBA")
+                    image.thumbnail(
+                        (constants.AVATAR_THUMB_SIZE, constants.AVATAR_THUMB_SIZE),
+                        PILImage.Resampling.LANCZOS,
+                    )
+                    temp = thumb.with_suffix(".tmp")
+                    # WebP 保留透明通道，体积约为 PNG 的四分之一。
+                    image.save(temp, format="WEBP", quality=80, method=4)
+                    os.replace(temp, thumb)
+            except (OSError, ValueError) as exc:
+                logger.debug(f"生成 {character} 头像缩略图失败: {exc}")
+                return None
+
+        try:
+            data = thumb.read_bytes()
+        except OSError:
+            return None
+
+        return "data:image/webp;base64," + base64.b64encode(data).decode("ascii")
+
+    async def avatars(self):
+        names = [
+            name.strip()
+            for name in str(request.query.get("names", "")).split(",")
+            if name.strip()
+        ][: constants.MAX_AVATAR_BATCH]
+
+        def build() -> dict:
+            return {name: self._avatar_thumbnail(name) for name in dict.fromkeys(names)}
+
+        return json_response({"avatars": await asyncio.to_thread(build)})
+
+    async def voice_text(self):
+        """当前档案每条语音的台词：{语音: {语言代码: 台词}}，皮肤档案优先用皮肤台词。"""
+        await self.scan_callback(False)
+
+        try:
+            character = self._canonical_character(request.query.get("character"))
+        except ValueError as exc:
+            return error_response(str(exc), status_code=404)
+
+        parsed = self.voice_mgr._parse_character_reference(character)
+        base = parsed[0]
+        texts = await self.voice_mgr.get_voice_texts(base)
+        merged = {
+            voice: dict(lines) for voice, lines in (texts.get("") or {}).items()
+        }
+
+        if parsed[1]:
+            try:
+                _, _, skin_name, _ = self._skin_package(character)
+            except ValueError:
+                skin_name = None
+
+            for raw_name, voices in texts.items():
+                # PRTS 台词标签里是原始皮肤名，插件存的是清理过的名字，按同样规则比对。
+                if raw_name and skin_name and (
+                    self.voice_mgr._skin_name_from_label(f"({raw_name})", raw_name)
+                    == skin_name
+                ):
+                    for voice, lines in voices.items():
+                        merged.setdefault(voice, {}).update(lines)
+
+        return json_response({"character": character, "texts": merged})
 
     async def audit(self):
         limit = request.query.get("limit", 100, type=int)

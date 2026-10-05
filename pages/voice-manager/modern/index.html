@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="明日方舟角色语音插件的档案、下载、完整性和回收站管理页面"
+    />
+    <title>语音档案控制台</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="masthead">
+      <div class="masthead-row">
+        <h1 id="page-title">语音档案</h1>
+        <div class="masthead-tools">
+          <span class="conn" id="conn" data-state="pending">正在连接 AstrBot</span>
+          <button class="btn" id="rescan" type="button">重建索引</button>
+        </div>
+      </div>
+      <dl class="summary" id="summary">
+        <div><dt>干员</dt><dd data-stat="operators">—</dd></div>
+        <div><dt>皮肤</dt><dd data-stat="skins">—</dd></div>
+        <div><dt>语音文件</dt><dd data-stat="wav">—</dd></div>
+        <div><dt>占用</dt><dd data-stat="bytes">—</dd></div>
+        <div><dt>语言</dt><dd data-stat="languages">—</dd></div>
+      </dl>
+      <nav class="tabs" role="tablist" aria-label="管理模块">
+        <button class="tab" role="tab" id="tab-archives" data-view="archives" aria-selected="true" aria-controls="view-archives">档案</button>
+        <button class="tab" role="tab" id="tab-tasks" data-view="tasks" aria-selected="false" aria-controls="view-tasks" tabindex="-1">下载<span class="badge" id="badge-tasks" hidden></span></button>
+        <button class="tab" role="tab" id="tab-integrity" data-view="integrity" aria-selected="false" aria-controls="view-integrity" tabindex="-1">完整性<span class="badge is-warn" id="badge-integrity" hidden></span></button>
+        <button class="tab" role="tab" id="tab-bindings" data-view="bindings" aria-selected="false" aria-controls="view-bindings" tabindex="-1">快捷绑定</button>
+        <button class="tab" role="tab" id="tab-aliases" data-view="aliases" aria-selected="false" aria-controls="view-aliases" tabindex="-1">干员别称</button>
+        <button class="tab" role="tab" id="tab-recovery" data-view="recovery" aria-selected="false" aria-controls="view-recovery" tabindex="-1">回收站与记录<span class="badge" id="badge-trash" hidden></span></button>
+      </nav>
+    </header>
+
+    <main class="page">
+      <section class="view" id="view-archives" role="tabpanel" aria-labelledby="tab-archives">
+        <div class="filters">
+          <input class="field search" id="archive-search" type="search" placeholder="搜索干员或皮肤" aria-label="搜索干员或皮肤" />
+          <div class="segmented" role="group" aria-label="档案范围" id="archive-kind">
+            <button type="button" aria-pressed="true" data-kind="all">全部</button>
+            <button type="button" aria-pressed="false" data-kind="skin">有皮肤语音</button>
+          </div>
+          <select class="field" id="archive-language" aria-label="语音语言"></select>
+          <p class="filters-count" id="archive-count" aria-live="polite"></p>
+        </div>
+        <ul class="catalog" id="catalog"></ul>
+        <div class="empty" id="archive-empty" hidden>
+          <p id="archive-empty-text">没有匹配的档案。</p>
+          <button class="btn" type="button" data-jump="tasks">去下载</button>
+        </div>
+      </section>
+
+      <section class="view" id="view-tasks" role="tabpanel" aria-labelledby="tab-tasks" hidden>
+        <div class="split">
+          <form class="block" id="fetch-form" novalidate>
+            <h2>下载干员语音</h2>
+            <p class="hint">从 PRTS 获取语音，任务在后台执行，关掉页面也不会中断。</p>
+            <label class="stack">
+              <span>干员名称</span>
+              <input class="field" id="fetch-character" list="operator-names" maxlength="80" placeholder="例如：阿米娅" autocomplete="off" aria-describedby="fetch-hint" />
+            </label>
+            <datalist id="operator-names"></datalist>
+            <div class="field-hint" id="fetch-hint" aria-live="polite"></div>
+            <fieldset class="stack">
+              <legend>语言</legend>
+              <div class="checks" id="fetch-languages"></div>
+            </fieldset>
+            <label class="toggle">
+              <input id="fetch-skin" type="checkbox" checked />
+              <span>同时下载皮肤语音</span>
+            </label>
+            <button class="btn btn-primary" type="submit">预览并下载</button>
+          </form>
+
+          <div class="block">
+            <div class="block-head">
+              <h2>任务</h2>
+              <button class="btn btn-quiet" type="button" id="tasks-refresh">刷新</button>
+            </div>
+            <ul class="rows" id="task-list"></ul>
+          </div>
+        </div>
+
+        <div class="block roster-block">
+          <div class="block-head">
+            <div>
+              <h2>还没下载的干员</h2>
+              <p class="hint" id="roster-meta">正在读取 PRTS 干员列表…</p>
+            </div>
+            <button class="btn btn-quiet" type="button" id="roster-refresh">从 PRTS 刷新</button>
+          </div>
+          <div class="roster-tools">
+            <input class="field" id="roster-search" type="search" placeholder="筛选干员" aria-label="筛选还没下载的干员" />
+            <button class="btn btn-small" type="button" id="roster-select-all">全选可见</button>
+          </div>
+          <ul class="roster" id="roster" aria-label="还没下载的干员"></ul>
+          <div class="roster-foot">
+            <p id="roster-count"></p>
+            <button class="btn btn-primary" type="button" id="roster-download" disabled>下载所选</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-integrity" role="tabpanel" aria-labelledby="tab-integrity" hidden>
+        <div class="block">
+          <div class="block-head">
+            <div>
+              <h2>完整性检查</h2>
+              <p class="hint">找出损坏的 WAV、无法识别的语音名、不可读文件和路径异常。只读检查不会改动文件；隔离会把异常文件移到隔离目录并重建索引，不会直接删除。</p>
+            </div>
+            <div class="btn-row">
+              <button class="btn" type="button" id="integrity-scan">只读检查</button>
+              <button class="btn btn-danger" type="button" id="integrity-quarantine">检查并隔离异常</button>
+            </div>
+          </div>
+          <div class="health" id="integrity-health"></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>相对路径</th><th>问题</th><th>处理</th></tr></thead>
+              <tbody id="integrity-issues"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-bindings" role="tabpanel" aria-labelledby="tab-bindings" hidden>
+        <div class="block">
+          <div class="block-head">
+            <div>
+              <h2>快捷绑定</h2>
+              <p class="hint">在聊天里发送触发词，直接播放指定档案的某条语音。</p>
+            </div>
+            <button class="btn btn-primary" type="button" id="binding-new">新建绑定</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>触发词</th><th>档案</th><th>语音</th><th>语言</th><th>状态</th><th><span class="sr-only">操作</span></th></tr></thead>
+              <tbody id="binding-list"></tbody>
+            </table>
+          </div>
+          <div class="empty" id="binding-empty" hidden>
+            <p>还没有快捷绑定。新建一个，用户发送触发词就能听到对应语音。</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-aliases" role="tabpanel" aria-labelledby="tab-aliases" hidden>
+        <div class="block">
+          <div class="block-head">
+            <div>
+              <h2>干员别称</h2>
+              <p class="hint">聊天命令里的简称。保存后立即用于播放、下载和快捷绑定。下载时用到 PRTS 收录的别称也会自动记在这里。</p>
+            </div>
+            <button class="btn btn-primary" type="button" id="alias-new">新增别称</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>别称</th><th>干员名</th><th>来源</th><th><span class="sr-only">操作</span></th></tr></thead>
+              <tbody id="alias-list"></tbody>
+            </table>
+          </div>
+          <div class="empty" id="alias-empty" hidden>
+            <p>还没有干员别称。新增后就能在聊天里用简称查询、下载或绑定语音。</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-recovery" role="tabpanel" aria-labelledby="tab-recovery" hidden>
+        <div class="split split-even">
+          <div class="block">
+            <div class="block-head">
+              <div>
+                <h2>回收站</h2>
+                <p class="hint">回收的语音可以恢复。永久删除无法撤销。</p>
+              </div>
+            </div>
+            <ul class="rows" id="trash-list"></ul>
+          </div>
+          <div class="block">
+            <div class="block-head">
+              <h2>操作记录</h2>
+              <button class="btn btn-quiet" type="button" id="audit-refresh">刷新</button>
+            </div>
+            <ul class="rows log" id="audit-list"></ul>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div class="drawer" id="drawer" hidden>
+      <div class="drawer-scrim" data-close-drawer></div>
+      <section class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+        <header class="drawer-head">
+          <div class="drawer-id">
+            <span class="avatar avatar-lg" id="drawer-avatar" aria-hidden="true"></span>
+            <div>
+              <h2 id="drawer-title">—</h2>
+              <p id="drawer-subtitle">—</p>
+            </div>
+          </div>
+          <button class="icon-btn" type="button" id="drawer-close" data-close-drawer aria-label="关闭档案">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" /></svg>
+          </button>
+        </header>
+
+        <div class="pkg-switch" id="drawer-packages" role="group" aria-label="语音包" hidden></div>
+
+        <div class="drawer-bar">
+          <div class="segmented lang-switch" role="group" aria-label="语言" id="drawer-languages"></div>
+          <div class="btn-row">
+            <button class="btn" type="button" id="drawer-export">导出 ZIP</button>
+            <label class="btn file-btn">
+              导入 ZIP
+              <input id="drawer-import" type="file" accept=".zip,application/zip" />
+            </label>
+            <button class="btn" type="button" id="drawer-select" aria-pressed="false">多选回收</button>
+          </div>
+        </div>
+
+        <div class="tally" id="drawer-tally"></div>
+        <div class="matrix" id="matrix"></div>
+
+        <footer class="dock" id="dock">
+          <div class="dock-idle" id="dock-idle">点一条语音试听，或管理这个文件。</div>
+          <div class="dock-voice" id="dock-voice" hidden>
+            <div class="dock-info">
+              <h3 id="dock-name">—</h3>
+              <p id="dock-meta">—</p>
+            </div>
+            <audio id="audio-player" controls preload="none"></audio>
+            <div class="btn-row">
+              <button class="btn" type="button" data-voice-action="download">下载</button>
+              <button class="btn" type="button" data-voice-action="replace">替换</button>
+              <button class="btn btn-danger" type="button" data-voice-action="remove">回收</button>
+            </div>
+            <blockquote class="dock-line" id="dock-line" hidden></blockquote>
+          </div>
+          <div class="dock-batch" id="dock-batch" hidden>
+            <p id="batch-count">已选 0 条</p>
+            <div class="btn-row">
+              <button class="btn" type="button" id="batch-all">全选可回收</button>
+              <button class="btn btn-danger" type="button" id="batch-remove" disabled>回收所选</button>
+              <button class="btn btn-quiet" type="button" id="batch-done">完成</button>
+            </div>
+          </div>
+        </footer>
+      </section>
+    </div>
+
+    <dialog class="modal" id="modal" aria-labelledby="modal-title">
+      <form method="dialog" class="modal-card">
+        <h3 id="modal-title">确认操作</h3>
+        <p id="modal-message"></p>
+        <div id="modal-fields"></div>
+        <div class="modal-actions">
+          <button class="btn btn-primary" id="modal-confirm" value="confirm">确认</button>
+          <button class="btn" id="modal-cancel" value="cancel" formnovalidate>取消</button>
+        </div>
+      </form>
+    </dialog>
+
+    <input id="replace-file" type="file" accept=".wav,audio/wav" hidden />
+    <div class="toasts" id="toasts" aria-live="polite"></div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

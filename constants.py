@@ -7,7 +7,7 @@
 # 这三个文件不是 Python，无法引用本常量。
 
 PLUGIN_NAME = "astrbot_plugin_mrfz"
-PLUGIN_VERSION = "3.7.4"
+PLUGIN_VERSION = "3.8.0"
 
 # ============================================================
 # 文件大小限制
@@ -25,6 +25,11 @@ MAX_PREVIEW_BYTES = 12 * 1024 * 1024  # 12MB - 预览文件大小上限
 
 SCAN_CACHE_DURATION = 60  # 秒 - 语音文件扫描缓存时间
 MAX_DOWNLOAD_LOCKS = 200  # 下载锁 LRU 缓存大小
+MAX_WAV_VALIDITY_CACHE = 50000  # WAV 头校验结果缓存条目上限
+OPERATOR_CATALOG_TTL = 12 * 3600  # 12小时 - PRTS 干员列表缓存时间
+VOICE_TEXT_TTL = 7 * 24 * 3600  # 7天 - PRTS 台词缓存时间
+AVATAR_THUMB_SIZE = 96  # 管理页头像缩略图边长（像素）
+MAX_AVATAR_BATCH = 60  # 单次请求的头像数量上限
 MAX_IMPORT_MEMBERS = 160  # ZIP 导入最大文件数量
 MAX_AUDIT_ITEMS = 500  # 审计日志最大保留条目数
 MAX_TASK_ITEMS = 100  # 后台任务最大保留条目数
@@ -231,12 +236,41 @@ PRTS_BASE_URL = "https://prts.wiki/"
 # 主机白名单。子域名（如 torappu.prts.wiki）通过后缀匹配一并放行。
 PRTS_ALLOWED_HOSTS = {"prts.wiki"}
 
+# MediaWiki API 入口。请求必须带完整的浏览器请求头（含 Accept-Language），否则会被 403。
+PRTS_API_URL = PRTS_BASE_URL + "api.php"
+
+# 只包含有“语音记录”页的干员，成员页名形如“阿米娅/语音记录”
+PRTS_OPERATOR_VOICE_CATEGORY = "Category:干员语音"
+
+# 分类成员分页上限（每页 500 条），防止异常的 continue 无限循环
+PRTS_MAX_CONTINUE_PAGES = 10
+
+# 语音页“路径”参数的语言标签（去掉皮肤括号后）-> 语言代码。
+# 西班牙语、俄语等 voice_custom 语言插件不支持，不在表内即跳过。
+PRTS_LANGUAGE_LABELS = {
+    "日语": "jp",
+    "日文": "jp",
+    "中文-普通话": "cn",
+    "中文": "cn",
+    "中文-方言": "fy",
+    "英语": "us",
+    "韩语": "kr",
+    "意大利语": "it",
+}
+
+# “联动”标签按资源目录判断语言
+PRTS_VOICE_FOLDERS = {
+    "voice": "jp",
+    "voice_cn": "cn",
+    "voice_en": "us",
+    "voice_kr": "kr",
+}
+
 # 语音资源 CDN 根地址
 PRTS_AUDIO_BASE_URL = "https://torappu.prts.wiki/assets/audio"
 
-# 角色页地址模板，{character} 处填入 URL 编码后的角色名
-PRTS_VOICE_PAGE_URL = PRTS_BASE_URL + "w/{character}/语音记录"
-PRTS_AVATAR_PAGE_URL = PRTS_BASE_URL + "w/文件:头像_{character}.png"
+# 头像文件页标题，通过 API 的 imageinfo 查询原图地址
+PRTS_AVATAR_FILE_TITLE = "文件:头像_{character}.png"
 
 # ============================================================
 # HTTP Headers
