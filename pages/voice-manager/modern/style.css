@@ -553,13 +553,14 @@ select.field {
 .catalog {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  align-items: start;
   gap: 10px;
 }
 
+/* 每张卡固定三段：名称、语言、皮肤。同一行的卡片等高，皮肤段贴底，
+   支持 subgrid 时三段在整行内逐段对齐。 */
 .entry {
-  display: grid;
-  align-content: start;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
   padding: 12px;
   border: 1px solid var(--line);
@@ -622,9 +623,30 @@ select.field {
 .entry-skins {
   display: flex;
   flex-wrap: wrap;
+  align-content: flex-start;
   gap: 6px;
+  margin-top: auto;
   padding-top: 10px;
   border-top: 1px dashed var(--line);
+}
+
+.entry-skins.is-empty {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 22px;
+}
+
+@supports (grid-template-rows: subgrid) {
+  .entry {
+    display: grid;
+    grid-row: span 3;
+    grid-template-rows: subgrid;
+    row-gap: 10px;
+  }
+
+  .entry-skins {
+    margin-top: 0;
+  }
 }
 
 .avatar {
