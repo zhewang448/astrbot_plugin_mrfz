@@ -468,7 +468,7 @@ function renderCatalog() {
                       )}">${escapeHtml(skin.skinName || "未命名皮肤")}</button>`,
                   )
                   .join("")}</span>`
-              : ""
+              : '<span class="entry-skins is-empty">没有皮肤语音</span>'
           }
         </li>
       `;
