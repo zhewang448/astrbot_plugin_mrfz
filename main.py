@@ -55,6 +55,9 @@ class MyPlugin(Star):
 
         # 6. 启动后台迁移与资源检查
         self._startup_task = asyncio.create_task(self._initialize_resources())
+        # 预热 PRTS 干员列表，供下载失败时给出拼写提示。单独成任务，
+        # 避免网络慢时拖住依赖启动任务的首次扫描；失败只记日志。
+        self._catalog_task = asyncio.create_task(self.voice_mgr.get_operator_catalog())
 
         # 7. 注册 AstrBot Plugin Page 管理端
         self.voice_page = VoicePageManager(
@@ -67,6 +70,7 @@ class MyPlugin(Star):
             default_language_rank=self.plugin_config.default_language_rank,
             default_download_langs=self.plugin_config.auto_download_language,
             default_download_skin=self.plugin_config.auto_download_skin,
+            page_style=self.plugin_config.page_style,
         )
 
     # ================== 持久化存储逻辑 ==================
@@ -233,6 +237,31 @@ class MyPlugin(Star):
             language,
         )
         return repaired, message
+
+    def _operator_hint(self, character: str) -> str:
+        """名称不在 PRTS 干员列表里时，给出最接近的几个干员名。"""
+        names = self.voice_mgr.cached_operator_names()
+        name = character.strip()
+
+        if not names or name in names:
+            return ""
+
+        matches = [candidate for candidate in names if name and name in candidate]
+        matches += [
+            candidate
+            for candidate in difflib.get_close_matches(
+                name,
+                names,
+                n=3,
+                cutoff=constants.FUZZY_MATCH_THRESHOLD,
+            )
+            if candidate not in matches
+        ]
+
+        if not matches:
+            return ""
+
+        return f"\n你是不是想找：{'、'.join(matches[:3])}"
 
     @staticmethod
     def _skin_choice_message(
@@ -617,7 +646,9 @@ class MyPlugin(Star):
                 )
 
                 if not success:
-                    yield event.plain_result(f"获取失败: {message}")
+                    yield event.plain_result(
+                        f"获取失败: {message}{self._operator_hint(character)}"
+                    )
                     return
 
                 await self._scan_if_needed(force=True)
@@ -973,6 +1004,8 @@ class MyPlugin(Star):
 
         if success:
             await self._scan_if_needed(force=True)
+        else:
+            message += self._operator_hint(character)
 
         yield event.plain_result(message)
 
@@ -1029,14 +1062,15 @@ class MyPlugin(Star):
         if voice_page is not None:
             await voice_page.terminate()
 
-        task = getattr(self, "_startup_task", None)
+        for name in ("_catalog_task", "_startup_task"):
+            task = getattr(self, name, None)
 
-        if task is None or task.done():
-            return
+            if task is None or task.done():
+                continue
 
-        task.cancel()
+            task.cancel()
 
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass

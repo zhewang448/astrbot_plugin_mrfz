@@ -5,22 +5,21 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from collections import OrderedDict
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
-from urllib.parse import quote, urljoin, urlparse
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from urllib.parse import quote, urlparse
 
 import aiohttp
 from astrbot.api import logger
-from bs4 import BeautifulSoup
 from PIL import Image as PILImage
 
-from . import constants
+from . import constants, prts
+from .prts import PRTSLookupError, PRTSNotFoundError
 
-
-class PRTSLookupError(Exception):
-    """PRTS 角色页请求或解析失败，并携带可直接展示的原因。"""
+__all__ = ["PRTSLookupError", "PRTSNotFoundError", "VoiceManager"]
 
 
 class VoiceManager:
@@ -39,6 +38,7 @@ class VoiceManager:
     CHARACTER_PAGE_RETRIES = constants.CHARACTER_PAGE_RETRIES
     RETRYABLE_PAGE_STATUSES = constants.RETRYABLE_PAGE_STATUSES
     VOICE_RESOURCE_MAP_VERSION = constants.VOICE_RESOURCE_MAP_VERSION
+    MAX_WAV_VALIDITY_CACHE = constants.MAX_WAV_VALIDITY_CACHE
 
     _SAFE_COMPONENT_RE = re.compile(
         r"^[\w\- .·()（）]+$",
@@ -56,6 +56,10 @@ class VoiceManager:
         self.voices_dir = self.data_dir / "voices"
         self.assets_dir = self.data_dir / "assets"
         self.operator_alias_file = self.data_dir / "operator_aliases.json"
+        self.operator_catalog_file = self.data_dir / "operator_catalog.json"
+        self.voice_text_dir = self.data_dir / "voice_texts"
+        self._operator_catalog: Optional[Dict[str, Any]] = None
+        self._catalog_lock = asyncio.Lock()
         self.operator_aliases: Dict[str, str] = dict(constants.OPERATOR_ALIAS)
         self._custom_operator_aliases: Dict[str, str] = {}
 
@@ -95,10 +99,16 @@ class VoiceManager:
         self._voice_resource_map_version = self.VOICE_RESOURCE_MAP_VERSION
         self._voice_remap_pending: set[Tuple[str, str]] = set()
 
+        # 路径 -> ((大小, 修改时间), 是否为有效 WAV)，供重复扫描跳过读文件头。
+        self._wav_validity_cache: Dict[str, Tuple[Tuple[int, int], bool]] = {}
+        # 每次扫描完成后递增，管理页据此判断缓存的档案汇总是否过期。
+        self.scan_generation = 0
+
         for directory in (
             self.data_dir,
             self.voices_dir,
             self.assets_dir,
+            self.voice_text_dir,
         ):
             directory.mkdir(
                 parents=True,
@@ -414,22 +424,23 @@ class VoiceManager:
         found = []
         allowed = set(self.VOICE_DESCRIPTIONS)
 
+        # 目录本身已校验在语音树内；条目来自 scandir，名字不含路径分隔符，
+        # 只需排除符号链接即可保证不越界，避免对每个文件做开销很大的 resolve()。
         try:
-            for path in directory.iterdir():
-                try:
-                    if (
-                        path.is_file()
-                        and path.suffix.lower() == ".wav"
-                        and path.stem in allowed
-                        and self._is_valid_wav_file(path)
-                        and self._path_is_within(
-                            path,
-                            directory,
-                        )
-                    ):
-                        found.append(path.stem)
-                except OSError:
-                    continue
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    try:
+                        name, suffix = os.path.splitext(entry.name)
+                        if (
+                            suffix.lower() == ".wav"
+                            and name in allowed
+                            and not entry.is_symlink()
+                            and entry.is_file(follow_symlinks=False)
+                            and self._is_valid_wav_entry(entry)
+                        ):
+                            found.append(name)
+                    except OSError:
+                        continue
         except OSError:
             return []
 
@@ -451,6 +462,30 @@ class VoiceManager:
                 return cls._looks_like_wav(handle.read(12))
         except OSError:
             return False
+
+    def _is_valid_wav_entry(self, entry: os.DirEntry) -> bool:
+        """按 (大小, 修改时间) 缓存 WAV 头校验结果，重复扫描时只需 stat。"""
+        stat = entry.stat(follow_symlinks=False)
+        signature = (stat.st_size, stat.st_mtime_ns)
+        cached = self._wav_validity_cache.get(entry.path)
+
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+
+        valid = False
+
+        if stat.st_size >= 12:
+            try:
+                with open(entry.path, "rb") as handle:
+                    valid = self._looks_like_wav(handle.read(12))
+            except OSError:
+                valid = False
+
+        if len(self._wav_validity_cache) >= self.MAX_WAV_VALIDITY_CACHE:
+            self._wav_validity_cache.clear()
+
+        self._wav_validity_cache[entry.path] = (signature, valid)
+        return valid
 
     @staticmethod
     def _is_valid_png_file(path: Path) -> bool:
@@ -504,6 +539,8 @@ class VoiceManager:
             str,
             List[str],
         ],
+        voice_files: Dict[str, Dict[str, List[str]]],
+        voice_index: Dict[str, List[str]],
     ) -> None:
         languages = {
             language: voices for language, voices in languages.items() if voices
@@ -512,8 +549,8 @@ class VoiceManager:
         if not languages:
             return
 
-        self.voice_files[character] = languages
-        self.voice_index[character] = sorted(
+        voice_files[character] = languages
+        voice_index[character] = sorted(
             languages,
             key=lambda language: int(
                 self.LANGUAGE_MAP.get(
@@ -580,7 +617,9 @@ class VoiceManager:
         self,
         character: str,
         resource_id: str,
+        packages: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
+        """packages 为 None 时使用当前索引；扫描过程中需传入正在构建的皮肤包。"""
         info = self.skin_metadata.get(character, {}).get(resource_id)
 
         if not info:
@@ -593,7 +632,11 @@ class VoiceManager:
 
         same_name_ids = [
             current_id
-            for current_id in self.skin_voice_index.get(character, {})
+            for current_id in (
+                self.skin_voice_index.get(character, {})
+                if packages is None
+                else packages
+            )
             if self.skin_metadata.get(character, {}).get(current_id, {}).get("name")
             == name
         ]
@@ -711,12 +754,20 @@ class VoiceManager:
         return None, matches or options
 
     def scan_voice_files(self) -> None:
-        """扫描真实、非空且名称合法的 WAV。"""
-        self.voice_index.clear()
-        self.voice_files.clear()
-        self.skin_voice_index.clear()
+        """扫描真实、非空且名称合法的 WAV。
+
+        新索引先在局部变量里建好再整体替换：扫描可能在线程里执行，
+        事件循环上的读取方不会看到清空到一半的索引。
+        """
+        voice_index: Dict[str, List[str]] = {}
+        voice_files: Dict[str, Dict[str, List[str]]] = {}
+        skin_voice_index: Dict[str, Dict[str, Dict[str, List[str]]]] = {}
 
         if not self.voices_dir.is_dir():
+            self.voice_index = voice_index
+            self.voice_files = voice_files
+            self.skin_voice_index = skin_voice_index
+            self.scan_generation += 1
             return
 
         try:
@@ -746,6 +797,8 @@ class VoiceManager:
             self._record_flat_character(
                 character,
                 normal_languages,
+                voice_files,
+                voice_index,
             )
 
             skin_root = character_dir / "skin"
@@ -797,7 +850,7 @@ class VoiceManager:
             if not packages:
                 continue
 
-            self.skin_voice_index[character] = packages
+            skin_voice_index[character] = packages
 
             aggregate: Dict[
                 str,
@@ -819,12 +872,15 @@ class VoiceManager:
                 reference = self._skin_reference(
                     character,
                     resource_id,
+                    packages,
                 )
 
                 if reference:
                     self._record_flat_character(
                         reference,
                         playable_languages,
+                        voice_files,
+                        voice_index,
                     )
 
             for language, voices in aggregate.items():
@@ -833,7 +889,14 @@ class VoiceManager:
             self._record_flat_character(
                 f"{character}皮肤",
                 aggregate,
+                voice_files,
+                voice_index,
             )
+
+        self.voice_index = voice_index
+        self.voice_files = voice_files
+        self.skin_voice_index = skin_voice_index
+        self.scan_generation += 1
 
         if self._voice_resource_map_version < self.VOICE_RESOURCE_MAP_VERSION:
             if not self._voice_remap_pending:
@@ -1114,19 +1177,21 @@ class VoiceManager:
     def _language_from_label(
         cls,
         label: str,
-    ) -> str:
-        if "日" in label:
-            return "jp"
-        if "英" in label:
-            return "us"
-        if "韩" in label:
-            return "kr"
-        if "方" in label:
-            return "fy"
-        if "意" in label:
-            return "it"
+        voice_key: str = "",
+    ) -> Optional[str]:
+        """把 PRTS 路径标签映射为语言代码，插件不支持的语言返回 None。
 
-        return "cn"
+        标签取自语音页模板，如“日语”“中文-普通话(超新星)”“中文-方言”。
+        联动干员只有一条“联动”标签，语言要看资源目录（voice/ 为日语）。
+        """
+        base = re.sub(r"[（(].*$", "", label).strip()
+        language = constants.PRTS_LANGUAGE_LABELS.get(base)
+
+        if language is None and base == "联动":
+            folder = str(voice_key).strip().strip("/").split("/", 1)[0]
+            language = constants.PRTS_VOICE_FOLDERS.get(folder)
+
+        return language
 
     @staticmethod
     def _is_skin_label(
@@ -1255,6 +1320,130 @@ class VoiceManager:
         info.setdefault("voice_keys", {})[language] = voice_key.strip().strip("/")
         return resource_id, display_name, directory
 
+    # ================== PRTS 干员列表与台词缓存 ==================
+
+    @staticmethod
+    def _read_json_file(path: Path) -> Optional[Dict[str, Any]]:
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError):
+            return None
+
+        return payload if isinstance(payload, dict) else None
+
+    async def get_operator_catalog(
+        self,
+        *,
+        force_refresh: bool = False,
+    ) -> Dict[str, Any]:
+        """PRTS 上所有带语音记录的干员，缓存到数据目录。
+
+        返回 {"items": [{"name", "addedAt"}], "fetchedAt": 时间戳, "stale": bool,
+        "error": str | None}。刷新失败时继续返回旧缓存并标记 stale。
+        """
+        async with self._catalog_lock:
+            cached = self._operator_catalog
+
+            if cached is None:
+                cached = self._read_json_file(self.operator_catalog_file)
+
+                if cached is not None and not isinstance(cached.get("items"), list):
+                    cached = None
+
+                self._operator_catalog = cached
+
+            fresh = cached is not None and (
+                time.time() - float(cached.get("fetchedAt", 0))
+                < constants.OPERATOR_CATALOG_TTL
+            )
+
+            if fresh and not force_refresh:
+                return {**cached, "stale": False, "error": None}
+
+            try:
+                async with aiohttp.ClientSession(
+                    headers=self.DEFAULT_HEADERS,
+                    timeout=aiohttp.ClientTimeout(total=30, connect=10),
+                ) as session:
+                    items = await prts.fetch_operator_catalog(session)
+            except PRTSLookupError as exc:
+                logger.warning(f"获取 PRTS 干员列表失败: {exc}")
+
+                if cached is None:
+                    return {"items": [], "fetchedAt": None, "stale": True, "error": str(exc)}
+
+                return {**cached, "stale": True, "error": str(exc)}
+
+            items = [
+                item
+                for item in items
+                if self._is_safe_component(item["name"], self.MAX_CHARACTER_LENGTH)
+            ]
+            payload = {"fetchedAt": time.time(), "items": items}
+
+            try:
+                self._atomic_write_json(self.operator_catalog_file, payload)
+            except OSError as exc:
+                logger.warning(f"保存干员列表缓存失败: {exc}")
+
+            self._operator_catalog = payload
+            return {**payload, "stale": False, "error": None}
+
+    def cached_operator_names(self) -> List[str]:
+        """不发请求，只返回已缓存的干员名，用于聊天里的拼写提示。"""
+        catalog = self._operator_catalog
+
+        if catalog is None:
+            catalog = self._read_json_file(self.operator_catalog_file) or {}
+
+        return [
+            str(item.get("name", ""))
+            for item in catalog.get("items", [])
+            if isinstance(item, dict) and item.get("name")
+        ]
+
+    def _voice_text_path(self, character: str) -> Optional[Path]:
+        if not self._is_safe_component(character, self.MAX_CHARACTER_LENGTH):
+            return None
+
+        return self._safe_path(self.voice_text_dir, f"{character}.json")
+
+    def _store_voice_texts(self, character: str, texts: Dict[str, Any]) -> None:
+        """下载或查询语音页时顺带缓存台词，管理页查看时就不必再请求 PRTS。"""
+        path = self._voice_text_path(character)
+
+        if path is None or not texts:
+            return
+
+        try:
+            self._atomic_write_json(path, {"fetchedAt": time.time(), "texts": texts})
+        except OSError as exc:
+            logger.debug(f"保存 {character} 的台词缓存失败: {exc}")
+
+    async def get_voice_texts(self, character: str) -> Dict[str, Any]:
+        """返回 {皮肤名或 "": {语音标题: {语言代码: 台词}}}，过期或缺失时从 PRTS 获取。"""
+        base_character = self.resolve_operator_alias(character)
+        path = self._voice_text_path(base_character)
+
+        if path is None:
+            return {}
+
+        cached = self._read_json_file(path)
+
+        if cached is not None and (
+            time.time() - float(cached.get("fetchedAt", 0)) < constants.VOICE_TEXT_TTL
+        ):
+            return cached.get("texts") or {}
+
+        try:
+            record = await self._get_voice_record(base_character)
+        except PRTSLookupError as exc:
+            logger.debug(f"获取 {base_character} 的台词失败: {exc}")
+            return (cached or {}).get("texts") or {}
+
+        return record["texts"]
+
     def _lock_for(
         self,
         character: str,
@@ -1301,13 +1490,22 @@ class VoiceManager:
         download_langs: str,
         *,
         require_no_failures: bool = False,
+        progress: Optional[Callable[[int, int, str], None]] = None,
+        follow_redirect: bool = True,
     ) -> Tuple[bool, str]:
+        """下载角色语音。
+
+        progress(已处理, 总数, 当前档案) 会在每条语音处理后调用。
+        名称在 PRTS 不存在时，沿 PRTS 重定向（PRTS 维护的别称）找到标准名，
+        记录为自定义别称后按标准名重新下载。
+        """
         parsed = self._parse_character_reference(character)
 
         if not parsed:
             return False, "角色名称不合法"
 
         base_character = self.resolve_operator_alias(parsed[0])
+        redirect_target = None
 
         valid_ranks = {item["rank"] for item in self.LANGUAGE_MAP.values()}
         selected_ranks = {rank for rank in str(download_langs) if rank in valid_ranks}
@@ -1339,38 +1537,71 @@ class VoiceManager:
                     headers=self.DEFAULT_HEADERS,
                     timeout=timeout,
                 ) as session:
-                    character_map = await self._get_character_id_map(
-                        base_character,
-                        session=session,
-                    )
+                    try:
+                        record = await self._get_voice_record(
+                            base_character,
+                            session=session,
+                        )
+                    except PRTSNotFoundError:
+                        if not follow_redirect:
+                            raise
 
-                    if not character_map:
-                        return (
-                            False,
-                            (f"PRTS 返回了角色 {base_character} 的空语音记录"),
+                        redirect_target = await prts.resolve_title(
+                            session,
+                            base_character,
                         )
 
+                        if (
+                            not redirect_target
+                            or redirect_target == base_character
+                            or not self._is_safe_component(
+                                redirect_target,
+                                self.MAX_CHARACTER_LENGTH,
+                            )
+                        ):
+                            raise
+
+                        record = None
+
+                    planned = []
+                    voice_items = []
+
+                    if record is not None:
+                        # 只请求该干员实际拥有的语音：部分干员不足 38 条，
+                        # 按完整编号表请求会产生大量 404。解析不到时退回完整列表。
+                        owned = set(record["files"])
+                        voice_items = [
+                            (description, file_number)
+                            for description, file_number in self.VOICE_RESOURCE_IDS.items()
+                            if not owned or description in owned
+                        ]
+
+                        for language_label, voice_key in record["paths"].items():
+                            language = self._language_from_label(
+                                language_label,
+                                str(voice_key),
+                            )
+
+                            if language is None:
+                                continue
+
+                            if self.LANGUAGE_MAP[language]["rank"] not in selected_ranks:
+                                continue
+
+                            is_skin = self._is_skin_label(language_label)
+
+                            if is_skin and not auto_download_skin:
+                                if (base_character, language) in self._voice_remap_pending:
+                                    remap_skipped_languages.add(language)
+                                continue
+
+                            planned.append((language_label, voice_key, language, is_skin))
+
+                    total = len(planned) * len(voice_items)
+                    done = 0
                     base_url = constants.PRTS_AUDIO_BASE_URL
 
-                    for (
-                        language_label,
-                        voice_key,
-                    ) in character_map.items():
-                        if language_label == "语音key":
-                            continue
-
-                        language = self._language_from_label(language_label)
-
-                        if self.LANGUAGE_MAP[language]["rank"] not in selected_ranks:
-                            continue
-
-                        is_skin = self._is_skin_label(language_label)
-
-                        if is_skin and not auto_download_skin:
-                            if (base_character, language) in self._voice_remap_pending:
-                                remap_skipped_languages.add(language)
-                            continue
-
+                    for language_label, voice_key, language, is_skin in planned:
                         remap_seen_languages.add(language)
                         force_redownload = (
                             base_character,
@@ -1398,21 +1629,27 @@ class VoiceManager:
                             safe="/",
                         )
 
-                        if not encoded_key:
-                            counts["failed"] += len(self.VOICE_DESCRIPTIONS)
-                            if force_redownload:
-                                remap_failed_languages.add(language)
-                            continue
-
                         display_name = (
                             (f"{base_character}皮肤[{skin_name}]")
                             if skin_resource_id
                             else base_character
                         )
+                        progress_label = (
+                            f"{display_name} {self.LANGUAGE_MAP[language]['name']}"
+                        )
+
+                        if not encoded_key:
+                            counts["failed"] += len(voice_items)
+                            done += len(voice_items)
+                            if force_redownload:
+                                remap_failed_languages.add(language)
+                            if progress:
+                                progress(done, total, progress_label)
+                            continue
 
                         logger.info(f"正在下载 {display_name} 的 {language} 语音...")
 
-                        for description, file_number in self.VOICE_RESOURCE_IDS.items():
+                        for description, file_number in voice_items:
                             file_name = f"cn_{file_number:03d}.wav"
                             voice_url = f"{base_url}/{encoded_key}/{file_name}"
 
@@ -1440,6 +1677,10 @@ class VoiceManager:
                                     await asyncio.sleep(0.4 * (2**attempt))
 
                             counts[status] += 1
+                            done += 1
+
+                            if progress:
+                                progress(done, total, progress_label)
 
                             if status == "failed":
                                 if force_redownload:
@@ -1465,16 +1706,17 @@ class VoiceManager:
                             self.VOICE_RESOURCE_MAP_VERSION
                         )
 
-                    (
-                        image_ok,
-                        image_message,
-                    ) = await self.fetch_character_image(
-                        base_character,
-                        session=session,
-                    )
+                    if redirect_target is None:
+                        (
+                            image_ok,
+                            image_message,
+                        ) = await self.fetch_character_image(
+                            base_character,
+                            session=session,
+                        )
 
-                    if not image_ok:
-                        logger.debug(f"获取头像跳过 {base_character}: {image_message}")
+                        if not image_ok:
+                            logger.debug(f"获取头像跳过 {base_character}: {image_message}")
 
             except PRTSLookupError as exc:
                 logger.warning(f"获取 {base_character} 的 PRTS 记录失败: {exc}")
@@ -1492,21 +1734,37 @@ class VoiceManager:
                 logger.exception(f"下载语音或头像异常: {exc}")
                 return False, str(exc)
 
-            self.scan_voice_files()
+            if redirect_target is None:
+                self.scan_voice_files()
 
-            success = (counts["downloaded"] > 0 or counts["existed"] > 0) and (
-                not require_no_failures or counts["failed"] == 0
+        if redirect_target is not None:
+            original = parsed[0].strip()
+            logger.info(f"PRTS 将 {original} 重定向到 {redirect_target}，按标准名下载")
+            # 记为自定义别称，之后播放、绑定都能继续用原来的叫法。
+            self.add_operator_alias(original, redirect_target)
+            success, summary = await self.fetch_character_voices(
+                redirect_target,
+                auto_download_skin,
+                download_langs,
+                require_no_failures=require_no_failures,
+                progress=progress,
+                follow_redirect=False,
             )
+            return success, f"{original} 即 {redirect_target}。{summary}"
 
-            summary = (
-                "下载完成："
-                f"新增 {counts['downloaded']}，"
-                f"已存在 {counts['existed']}，"
-                f"不存在 {counts['not_found']}，"
-                f"失败 {counts['failed']}"
-            )
+        success = (counts["downloaded"] > 0 or counts["existed"] > 0) and (
+            not require_no_failures or counts["failed"] == 0
+        )
 
-            return success, summary
+        summary = (
+            "下载完成："
+            f"新增 {counts['downloaded']}，"
+            f"已存在 {counts['existed']}，"
+            f"不存在 {counts['not_found']}，"
+            f"失败 {counts['failed']}"
+        )
+
+        return success, summary
 
     async def migrate_legacy_skin_directories(
         self,
@@ -1682,7 +1940,14 @@ class VoiceManager:
                         ):
                             continue
 
-                        language = self._language_from_label(language_label)
+                        language = self._language_from_label(
+                            language_label,
+                            str(voice_key),
+                        )
+
+                        if language is None:
+                            continue
+
                         self._register_skin_metadata(
                             character,
                             language_label,
@@ -1953,25 +2218,19 @@ class VoiceManager:
             for allowed in constants.PRTS_ALLOWED_HOSTS
         )
 
-    async def _get_character_id_map(
+    async def _get_voice_record(
         self,
         character: str,
         *,
         session: Optional[aiohttp.ClientSession] = None,
-    ) -> Optional[Dict[str, str]]:
+    ) -> Dict[str, Any]:
+        """通过 PRTS API 读取语音记录页，见 prts.parse_voice_record。"""
         parsed = self._parse_character_reference(character)
 
         if not parsed:
-            return None
+            raise PRTSLookupError("角色名称不合法")
 
         base_character = self.resolve_operator_alias(parsed[0])
-        encoded_character = quote(
-            base_character,
-            safe="",
-        )
-
-        url = constants.PRTS_VOICE_PAGE_URL.format(character=encoded_character)
-
         owns_session = session is None
 
         if owns_session:
@@ -1985,94 +2244,23 @@ class VoiceManager:
 
         try:
             assert session is not None
-            html = None
-
-            for attempt in range(self.CHARACTER_PAGE_RETRIES):
-                try:
-                    async with session.get(url) as response:
-                        status = response.status
-
-                        if status == 200:
-                            html = await response.text()
-                            break
-
-                        if status == 404:
-                            raise PRTSLookupError(
-                                f"PRTS 未找到角色 {base_character} 的语音记录（HTTP 404）"
-                            )
-
-                        if status == 403:
-                            raise PRTSLookupError(
-                                "PRTS 拒绝访问（HTTP 403），请稍后重试或检查网络出口"
-                            )
-
-                        if status not in self.RETRYABLE_PAGE_STATUSES:
-                            raise PRTSLookupError(f"PRTS 请求失败（HTTP {status}）")
-
-                        if attempt + 1 >= self.CHARACTER_PAGE_RETRIES:
-                            if status == 429:
-                                raise PRTSLookupError(
-                                    "PRTS 请求过于频繁（HTTP 429），请稍后重试"
-                                )
-
-                            raise PRTSLookupError(
-                                f"PRTS 服务暂时异常（HTTP {status}），请稍后重试"
-                            )
-
-                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                    if attempt + 1 >= self.CHARACTER_PAGE_RETRIES:
-                        raise PRTSLookupError(f"访问 PRTS 时网络异常: {exc}") from exc
-
-                await asyncio.sleep(0.4 * (2**attempt))
-
-            if html is None:
-                raise PRTSLookupError("PRTS 页面请求未返回内容")
-
-            soup = BeautifulSoup(
-                html,
-                "html.parser",
-            )
-            voice_div = soup.find(
-                "div",
-                attrs={"data-voice-base": True},
-            )
-
-            if not voice_div:
-                raise PRTSLookupError("PRTS 页面结构可能已变化：未找到语音记录节点")
-
-            voice_data = voice_div.get("data-voice-base") or ""
-            voice_data = str(voice_data).strip()
-
-            result = {}
-
-            for item in voice_data.split(","):
-                if ":" not in item:
-                    continue
-
-                language, path = item.split(
-                    ":",
-                    1,
-                )
-
-                language = language.strip()
-                path = path.strip()
-
-                if language and path:
-                    result[language] = path
-
-            if not result:
-                raise PRTSLookupError("PRTS 页面结构可能已变化：语音记录内容为空")
-
-            return result
-
-        except PRTSLookupError:
-            raise
-        except Exception as exc:
-            logger.error(f"解析 PRTS 页面失败: {exc}")
-            raise PRTSLookupError(f"解析 PRTS 页面失败: {exc}") from exc
+            record = await prts.fetch_voice_record(session, base_character)
         finally:
             if owns_session and session is not None:
                 await session.close()
+
+        self._store_voice_texts(base_character, record["texts"])
+        return record
+
+    async def _get_character_id_map(
+        self,
+        character: str,
+        *,
+        session: Optional[aiohttp.ClientSession] = None,
+    ) -> Optional[Dict[str, str]]:
+        """返回 {语言标签: PRTS 资源路径}，例如 {"日语": "voice/char_002_amiya"}。"""
+        record = await self._get_voice_record(character, session=session)
+        return record["paths"]
 
     async def ensure_assets(self) -> None:
         try:
@@ -2132,12 +2320,6 @@ class VoiceManager:
             )
 
         base_char = self.resolve_operator_alias(parsed[0])
-        encoded_character = quote(
-            base_char,
-            safe="",
-        )
-
-        page_url = constants.PRTS_AVATAR_PAGE_URL.format(character=encoded_character)
 
         owns_session = session is None
 
@@ -2153,34 +2335,19 @@ class VoiceManager:
         try:
             assert session is not None
 
-            async with session.get(page_url) as response:
-                if response.status != 200:
-                    return (
-                        False,
-                        (f"获取头像页面失败: HTTP {response.status}"),
-                    )
+            try:
+                image_url = await prts.fetch_file_url(
+                    session,
+                    constants.PRTS_AVATAR_FILE_TITLE.format(character=base_char),
+                )
+            except PRTSLookupError as exc:
+                return False, f"获取头像地址失败: {exc}"
 
-                html = await response.text()
-
-            soup = BeautifulSoup(
-                html,
-                "html.parser",
-            )
-            meta = soup.find(
-                "meta",
-                attrs={"property": "og:image"},
-            )
-
-            if not meta or not meta.get("content"):
+            if not image_url:
                 return (
                     False,
                     "未找到头像图片链接",
                 )
-
-            image_url = urljoin(
-                constants.PRTS_BASE_URL,
-                str(meta["content"]),
-            )
 
             if not self._is_trusted_prts_url(image_url):
                 return (

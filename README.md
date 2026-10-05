@@ -1,6 +1,6 @@
 # 明日方舟角色语音插件 astrbot_plugin_mrfz
 
-## v3.7.4
+## v3.8.0
 
 这是一个支持明日方舟所有角色、所有皮肤、全语言语音的 AstrBot 插件。
 内置了 PRTS 终端风格的图片渲染引擎，支持模糊匹配和自定义语音绑定。
@@ -18,7 +18,7 @@
 - **干员别称识别**：内置“水陈、叔叔、红蒂”等常用别称，也支持管理员自定义别称。
 - **精美可视化**：生成 PRTS 终端风格的帮助菜单和干员列表。
 - **自定义绑定**：可以将任意语音绑定到简短的触发词（如 `早安` -> `阿米娅 问候`）。
-- **自动资源管理**：自动下载语音、自动爬取干员头像。
+- **自动资源管理**：通过 PRTS Wiki API 自动下载语音与干员头像；名称写错时给出相近干员名，PRTS 收录的别称会自动识别。
 - **安全缓存**：校验并隔离损坏语音，列表与帮助图片固定覆盖缓存文件。
 - **Pages 管理端**：在 AstrBot WebUI 中试听、导入、导出、检查、回收和恢复语音文件。
 
@@ -27,11 +27,13 @@
 AstrBot `>= 4.26.0` 会自动发现插件的 `voice-manager` Page。安装并重载插件后，
 从 WebUI 的插件详情页打开“语音档案控制台”即可使用：
 
-- 干员、皮肤和语言档案筛选，逐条查看 38 类语音状态。
+- 按干员合并展示基础与皮肤语音包，附头像；逐条查看 38 类语音状态，试听时显示台词。
 - 在线试听、单条下载、整包导出、WAV 替换和 ZIP 批量导入。
-- PRTS 后台下载任务、索引重扫和 WAV 完整性检查。
+- PRTS 干员列表：输入联想、列出尚未下载的干员并批量下载，后台任务显示实时进度。
+- 索引重扫和 WAV 完整性检查。
 - 快捷绑定管理、可恢复回收站、替换备份和操作审计。
 - 皮肤档案中的基础回退语音只允许试听或导出，不会被误删。
+- 提供新版与经典版两套界面，通过配置项 `page_style` 切换。
 
 ## 🛠️ 指令说明
 
@@ -57,6 +59,7 @@ AstrBot `>= 4.26.0` 会自动发现插件的 `voice-manager` Page。安装并重
 | `auto_download_skin`     | bool   | `true`     | 下载时是否包含皮肤语音。                                                  |
 | `default_language_rank`  | string | `"123456"` | 播放时的语言优先级。<br>1:方言, 2:中文, 3:日语, 4:英语, 5:韩语, 6:意语    |
 | `auto_download_language` | string | `"123"`    | 执行下载指令时，默认下载哪些语言（代码同上）。                            |
+| `page_style`             | string | `"modern"` | 语音档案控制台的界面：`modern` 新版，`classic` 经典版。保存后刷新页面生效。 |
 
 ## 📂 目录结构
 
@@ -70,9 +73,10 @@ astrbot_plugin_mrfz/
 ├── data_source.py          # 数据源与下载逻辑
 ├── renderer.py             # 图片渲染模块
 ├── voice_page.py           # Pages 管理后端
+├── prts.py                 # PRTS Wiki API 客户端
 ├── constants.py            # 全局常量（版本、限额、语言与资源映射）
 ├── config.py               # 配置对象 PluginConfig
-├── pages/voice-manager/    # 管理端前端
+├── pages/voice-manager/    # 管理端前端（modern/ 新版，classic/ 经典版）
 ├── SourceHanSerifCN...otf  # 字体文件
 ├── _conf_schema.json       # WebUI 配置定义
 ├── requirements.txt        # 依赖列表
@@ -96,6 +100,8 @@ astrbot_plugin_mrfz/
 ├── custom_commands.json    # [自动生成] 自定义绑定数据
 ├── operator_aliases.json   # [自动生成] 自定义干员别称
 ├── voice_index.json        # [自动生成] 本地语音索引缓存
+├── operator_catalog.json   # [自动生成] PRTS 干员列表缓存（12 小时刷新）
+├── voice_texts/            # [自动生成] PRTS 台词缓存
 ├── render_cache/           # [自动生成] 固定的 help.png 与 list.png
 ├── page_manager/           # [自动生成] 回收站、备份、导出和审计
 └── quarantine/             # [自动生成] 隔离的损坏语音文件
@@ -107,7 +113,7 @@ astrbot_plugin_mrfz/
 
 ## ⚠️ 注意事项
 
-1. **资源来源**：所有语音和图片资源实时爬取自 [PRTS Wiki](https://prts.wiki/)，请遵守相关使用协议。
+1. **资源来源**：所有语音、图片和台词均通过 API 获取自 [PRTS Wiki](https://prts.wiki/)，请遵守相关使用协议。
 2. **网络问题**：批量下载语音时请确保网络通畅，以免下载不完整。
 3. **文件删除**：可自行在`\data\plugin_data\astrbot_plugin_mrfz\voices\`目录下删除不需要的语音文件，并在之后重载插件。
 4. **版本更新与数据迁移**：新版本升级了本地语音索引结构，更新后首次启动会自动进行数据迁移，包括迁移旧版皮肤目录、修复错位的语音资源编号、补齐皮肤稳定索引等。这些步骤会联网请求 PRTS，耗时可能较长；期间部分语音可能暂时无法播放或显示不完整，属于正常现象。请耐心等待，留意日志中的迁移完成提示，不要在迁移过程中反复重载插件，以免中断迁移。
