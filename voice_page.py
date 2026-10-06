@@ -29,6 +29,7 @@ from astrbot.api.web import (
 from PIL import Image as PILImage
 
 from . import constants
+from .config import ConfigConflict
 from .prts import PRTSLookupError, PRTSNotFoundError, resolve_title
 
 
@@ -59,9 +60,10 @@ class VoicePageManager:
         save_custom_commands: Callable[[], bool],
         scan_callback: Callable[[bool], Awaitable[None]],
         valid_trigger: Callable[[object], bool],
-        default_language_rank: str,
-        default_download_langs: str,
+        default_download_langs: str | list[str],
         default_download_skin: bool,
+        config_store,
+        apply_config: Callable[[Any], None],
         page_style: str = "modern",
     ) -> None:
         self.context = context
@@ -70,10 +72,12 @@ class VoicePageManager:
         self.save_custom_commands = save_custom_commands
         self.scan_callback = scan_callback
         self.valid_trigger = valid_trigger
-        self.default_language_rank = str(default_language_rank)
-        self.default_download_langs = str(default_download_langs)
+        self.default_download_langs = constants.normalize_languages(default_download_langs)
         self.default_download_skin = bool(default_download_skin)
         self.page_style = "classic" if page_style == "classic" else "modern"
+        self.config_store = config_store
+        self.apply_config = apply_config
+        self._config_lock = asyncio.Lock()
 
         self.data_dir = Path(self.voice_mgr.data_dir)
         self.voices_dir = Path(self.voice_mgr.voices_dir)
@@ -116,6 +120,8 @@ class VoicePageManager:
     def _register_routes(self) -> None:
         routes = [
             ("/ui", self.ui, ["GET"], "Voice page UI preferences"),
+            ("/config", self.read_config, ["GET"], "Read plugin configuration"),
+            ("/config", self.save_config, ["POST"], "Save plugin configuration"),
             ("/overview", self.overview, ["GET"], "Voice archive overview"),
             ("/archives", self.archives, ["GET"], "List voice archives"),
             ("/archive", self.archive_detail, ["GET"], "Voice archive details"),
@@ -902,6 +908,40 @@ class VoicePageManager:
 
     async def ui(self):
         return json_response({"style": self.page_style})
+
+    async def read_config(self):
+        return json_response(await asyncio.to_thread(self.config_store.snapshot))
+
+    async def save_config(self):
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求格式无效", status_code=400)
+        async with self._config_lock:
+            try:
+                # 保存和运行时更新作为一个不可中断的提交，断开请求仍完成生效。
+                async def commit():
+                    candidate = await asyncio.to_thread(self.config_store.save, payload.get("config"), payload.get("revision"))
+                    self.apply_config(candidate)
+                    return self.config_store.snapshot()
+                worker = asyncio.create_task(commit())
+                try:
+                    saved = await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    while not worker.done():
+                        try:
+                            await asyncio.shield(worker)
+                        except asyncio.CancelledError:
+                            continue
+                    worker.result()
+                    raise
+            except ConfigConflict as exc:
+                return error_response(str(exc), status_code=409)
+            except ValueError as exc:
+                return error_response(str(exc), status_code=400)
+            except OSError as exc:
+                logger.warning(f"插件配置保存失败: {exc}")
+                return error_response("配置未能保存，请检查配置文件权限后重试", status_code=500)
+        return json_response(saved)
 
     async def archives(self):
         await self.scan_callback(False)
@@ -2122,24 +2162,15 @@ class VoicePageManager:
         if not self.voice_mgr.validate_character(character):
             raise ValueError("角色名称不合法")
 
-        rank_to_language = {
-            str(info["rank"]): code
-            for code, info in self.voice_mgr.LANGUAGE_MAP.items()
-        }
-        requested = str(
-            payload.get("languages", self.default_download_langs)
-        ).strip()
-        ranks = "".join(
-            dict.fromkeys(rank for rank in requested if rank in rank_to_language)
-        )
+        languages = constants.normalize_languages(payload.get("languages", self.default_download_langs))
 
-        if not ranks:
+        if not languages:
             raise ValueError("请选择至少一种下载语言")
 
         return {
             "character": character,
-            "languages": ranks,
-            "languageCodes": [rank_to_language[rank] for rank in ranks],
+            "languages": languages,
+            "languageCodes": languages,
             "includeSkin": bool(
                 payload.get("includeSkin", self.default_download_skin)
             ),

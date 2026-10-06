@@ -502,9 +502,12 @@ class VoiceRenderer:
         x: int,
         y: int,
         languages: List[Dict],
+        max_width: int,
     ) -> None:
-        for index, language in enumerate(languages[:6]):
-            label = str(language.get("display", "--"))[:2]
+        columns = max(1, max_width // 34)
+        for index, language in enumerate(languages):
+            display = str(language.get("display", "--"))
+            label = "西语" if display == "西班牙语" else display[:2]
             raw_color = language.get("color", self.COLOR_MUTED)
             try:
                 color = tuple(raw_color)[:3]
@@ -514,13 +517,15 @@ class VoiceRenderer:
                 color = self.COLOR_MUTED
 
             tag_w = 29
-            tag_x = x + index * (tag_w + 5)
-            draw.rectangle((tag_x, y, tag_x + tag_w, y + 19), fill=(42, 48, 51))
-            draw.rectangle((tag_x, y + 16, tag_x + tag_w, y + 19), fill=color)
+            row, column = divmod(index, columns)
+            tag_x = x + column * (tag_w + 5)
+            tag_y = y + row * 24
+            draw.rectangle((tag_x, tag_y, tag_x + tag_w, tag_y + 19), fill=(42, 48, 51))
+            draw.rectangle((tag_x, tag_y + 16, tag_x + tag_w, tag_y + 19), fill=color)
             label_font = self._load_font(11, bold=True)
             label_w = draw.textlength(label, font=label_font)
             draw.text(
-                (tag_x + (tag_w - label_w) / 2, y + 1),
+                (tag_x + (tag_w - label_w) / 2, tag_y + 1),
                 label,
                 font=label_font,
                 fill=self.COLOR_TEXT,
@@ -625,8 +630,10 @@ class VoiceRenderer:
                 font=self._load_font(10, mono=True),
                 fill=accent,
             )
+        languages = item.get("languages", [])
+        rows = math.ceil(len(languages) / max(1, text_width // 34))
         self._draw_language_tags(
-            draw, text_x, y + height - 34, item.get("languages", [])
+            draw, text_x, y + height - 34 - max(0, rows - 1) * 24, languages, text_width,
         )
 
         draw.polygon(
@@ -712,7 +719,7 @@ class VoiceRenderer:
 
     def _render_help_logic(self) -> str:
         width = self.CANVAS_WIDTH
-        height = 1440
+        height = 1640
         image = self._new_rgba((width, height), self.COLOR_BG + (255,))
         draw = ImageDraw.Draw(image)
         self._draw_background(image, draw)
@@ -1025,7 +1032,7 @@ class VoiceRenderer:
 
         # Language routing panel.
         route_y = 986
-        route_h = 302
+        route_h = 502
         self._draw_cut_panel(
             draw,
             (left, route_y, content_width, route_h),
@@ -1050,7 +1057,7 @@ class VoiceRenderer:
         )
         draw.text(
             (left + content_width - 154, route_y + 19),
-            "6 CHANNELS",
+            "10 CHANNELS",
             font=self._load_font(13, bold=True, mono=True),
             fill=self.COLOR_YELLOW,
         )
@@ -1066,6 +1073,10 @@ class VoiceRenderer:
             ("04", "英语", "ENGLISH", "us"),
             ("05", "韩语", "KOREAN", "kr"),
             ("06", "意语", "ITALIAN", "it"),
+            ("07", "俄语", "RUSSIAN", "ru"),
+            ("08", "德语", "GERMAN", "de"),
+            ("09", "西班牙语", "SPANISH", "es"),
+            ("10", "法语", "FRENCH", "fr"),
         )
         lane_gap = 10
         lane_width = (content_width - 48 - lane_gap * 2) // 3
@@ -1110,7 +1121,7 @@ class VoiceRenderer:
             draw_status_light(lane_x + 58, lane_y + 62, "ROUTE READY")
 
         # Operational footer strip above the standard renderer footer.
-        status_y = 1311
+        status_y = 1511
         draw.rectangle(
             (left, status_y, left + content_width, status_y + 48),
             fill=self.COLOR_BLACK,
@@ -1144,8 +1155,8 @@ class VoiceRenderer:
         skin_operators = list(data.get("skin_operators") or [])
 
         custom_card_h = 108
-        operator_card_h = 112
-        skin_card_h = 124
+        operator_card_h = 136
+        skin_card_h = 148
         modules_cols = 5
         modules_rows = (
             math.ceil(len(voice_descriptions) / modules_cols)

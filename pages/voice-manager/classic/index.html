@@ -9,6 +9,7 @@
     />
     <title>语音档案控制台</title>
     <link rel="stylesheet" href="./style.css" />
+    <link rel="stylesheet" href="../settings.css" />
   </head>
   <body>
     <div class="noise" aria-hidden="true"></div>
@@ -68,6 +69,7 @@
             <span class="nav-code">07</span>
             <span><b>恢复与审计</b><small>Recovery & Audit</small></span>
           </button>
+          <button class="nav-item" data-view="settings"><span class="nav-code">08</span><span><b>插件设置</b><small>Settings</small></span></button>
         </nav>
         <div class="sidebar-status">
           <span>INDEX STATUS</span>
@@ -78,6 +80,7 @@
       </aside>
 
       <main class="workspace">
+        <section class="view" id="view-settings" data-view-panel="settings"></section>
         <section class="view is-active" id="view-overview" data-view-panel="overview">
           <div class="page-heading">
             <div>
@@ -399,6 +402,7 @@
 
     <input id="replace-file" type="file" accept=".wav,audio/wav" hidden />
     <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+    <script src="../settings.js"></script>
     <script type="module" src="./app.js"></script>
   </body>
 </html>

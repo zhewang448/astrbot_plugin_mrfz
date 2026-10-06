@@ -9,6 +9,7 @@
     />
     <title>语音档案控制台</title>
     <link rel="stylesheet" href="./style.css" />
+    <link rel="stylesheet" href="../settings.css" />
   </head>
   <body>
     <header class="masthead">
@@ -33,10 +34,12 @@
         <button class="tab" role="tab" id="tab-bindings" data-view="bindings" aria-selected="false" aria-controls="view-bindings" tabindex="-1">快捷绑定</button>
         <button class="tab" role="tab" id="tab-aliases" data-view="aliases" aria-selected="false" aria-controls="view-aliases" tabindex="-1">干员别称</button>
         <button class="tab" role="tab" id="tab-recovery" data-view="recovery" aria-selected="false" aria-controls="view-recovery" tabindex="-1">回收站与记录<span class="badge" id="badge-trash" hidden></span></button>
+        <button class="tab" role="tab" id="tab-settings" data-view="settings" aria-selected="false" aria-controls="view-settings" tabindex="-1">设置</button>
       </nav>
     </header>
 
     <main class="page">
+      <section class="view" id="view-settings" role="tabpanel" aria-labelledby="tab-settings" hidden></section>
       <section class="view" id="view-archives" role="tabpanel" aria-labelledby="tab-archives">
         <div class="filters">
           <input class="field search" id="archive-search" type="search" placeholder="搜索干员或皮肤" aria-label="搜索干员或皮肤" />
@@ -265,6 +268,7 @@
 
     <input id="replace-file" type="file" accept=".wav,audio/wav" hidden />
     <div class="toasts" id="toasts" aria-live="polite"></div>
+    <script src="../settings.js"></script>
     <script type="module" src="./app.js"></script>
   </body>
 </html>

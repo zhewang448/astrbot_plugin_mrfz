@@ -1,4 +1,5 @@
 const bridge = window.AstrBotPluginPage;
+let settings;
 
 const VOICE_TYPES = [
   "任命助理",
@@ -42,12 +43,16 @@ const VOICE_TYPES = [
 ];
 
 const LANGUAGES = [
-  { code: "fy", name: "方言", rank: "1" },
-  { code: "cn", name: "中文", rank: "2" },
-  { code: "jp", name: "日语", rank: "3" },
-  { code: "us", name: "英语", rank: "4" },
-  { code: "kr", name: "韩语", rank: "5" },
-  { code: "it", name: "意语", rank: "6" },
+  { code: "fy", name: "方言" },
+  { code: "cn", name: "中文" },
+  { code: "jp", name: "日语" },
+  { code: "us", name: "英语" },
+  { code: "kr", name: "韩语" },
+  { code: "it", name: "意语" },
+  { code: "ru", name: "俄语" },
+  { code: "de", name: "德语" },
+  { code: "es", name: "西班牙语" },
+  { code: "fr", name: "法语" },
 ];
 
 const state = {
@@ -152,6 +157,7 @@ function switchView(view) {
   if (view === "bindings") loadBindings();
   if (view === "aliases") loadAliases();
   if (view === "recovery") loadRecovery();
+  if (view === "settings") settings.load();
 }
 
 function renderLanguages() {
@@ -165,10 +171,10 @@ function renderLanguages() {
   $("#fetch-languages").innerHTML = LANGUAGES.map(
     (item) => `
       <label class="check-item">
-        <input type="checkbox" name="fetch-language" value="${item.rank}" ${
-          ["1", "2", "3"].includes(item.rank) ? "checked" : ""
+        <input type="checkbox" name="fetch-language" value="${item.code}" ${
+          ["fy", "cn", "jp"].includes(item.code) ? "checked" : ""
         } />
-        <span>${escapeHtml(item.name)} <small>R-${item.rank}</small></span>
+        <span>${escapeHtml(item.name)}</span>
       </label>
     `,
   ).join("");
@@ -675,13 +681,12 @@ async function submitFetch(event) {
   event.preventDefault();
   const character = $("#fetch-character").value.trim();
   const languages = $$('input[name="fetch-language"]:checked')
-    .map((input) => input.value)
-    .join("");
+    .map((input) => input.value);
   if (!character) {
     toast("请输入角色名称", "error");
     return;
   }
-  if (!languages) {
+  if (!languages.length) {
     toast("请至少选择一种语言", "error");
     return;
   }
@@ -1268,6 +1273,11 @@ async function initialize() {
   await bridge.ready();
   document.title = bridge.t?.("pages.voice-manager.title", "语音档案控制台") || "语音档案控制台";
   renderLanguages();
+  settings = window.VoiceSettings({bridge, root: $("#view-settings"), onChange(config) {
+    $$('input[name="fetch-language"]').forEach(input => { input.checked = config.auto_download_language.includes(languageName(input.value)); });
+    $("#fetch-skin").checked = config.auto_download_skin;
+  }});
+  await settings.load();
   bindEvents();
   setConnection(true, "AstrBot 已连接");
   await loadOverview();
