@@ -113,8 +113,11 @@ class VoicePageManager:
         # (扫描代次, 数据)：文件变动都会触发重新扫描，代次变化即缓存失效。
         self._archives_cache: Optional[tuple[int, list[dict]]] = None
         self._storage_cache: Optional[tuple[int, tuple[int, int]]] = None
+        self._audit_lines = self._count_audit_lines()
+        self._last_page_cleanup = time.monotonic()
         self._cleanup_operation_previews(remove_orphans=True)
         self._cleanup_orphan_uploads()
+        self._cleanup_expired_page_data()
         self._register_routes()
 
     def _register_routes(self) -> None:
@@ -132,12 +135,6 @@ class VoicePageManager:
                 self.replace_voice,
                 ["POST"],
                 "Replace one voice file",
-            ),
-            (
-                "/import/<token>",
-                self.import_archive,
-                ["POST"],
-                "Import a voice ZIP",
             ),
             (
                 "/import/preview/<token>",
@@ -351,6 +348,60 @@ class VoicePageManager:
         except OSError:
             pass
 
+    def _cleanup_expired_page_data(self) -> None:
+        """删除超过保留期的覆盖备份和回收站条目；导入回滚仍引用的备份保留。"""
+        cutoff = time.time() - constants.PAGE_RETENTION_SECONDS
+        referenced = set()
+
+        try:
+            recoveries = list(self.preview_dir.glob("*/recovery.json"))
+        except OSError:
+            recoveries = []
+
+        for recovery in recoveries:
+            for item in (self.voice_mgr._read_json_file(recovery) or {}).get("files", []):
+                backup = item.get("backup") if isinstance(item, dict) else None
+
+                try:
+                    referenced.add(Path(str(backup)).relative_to(self.backup_dir).parts[0])
+                except (ValueError, IndexError):
+                    continue
+
+        for root, keep, pattern in (
+            (self.backup_dir, referenced, None),
+            (self.trash_dir, set(), self._TRASH_ID_RE),
+        ):
+            try:
+                with os.scandir(root) as entries:
+                    children = list(entries)
+            except OSError:
+                continue
+
+            for entry in children:
+                try:
+                    if (
+                        entry.name in keep
+                        or (pattern is not None and not pattern.fullmatch(entry.name))
+                        or entry.is_symlink()
+                        or not entry.is_dir(follow_symlinks=False)
+                        or entry.stat(follow_symlinks=False).st_mtime >= cutoff
+                    ):
+                        continue
+
+                    shutil.rmtree(entry.path)
+                except OSError as exc:
+                    logger.debug(f"清理过期管理页数据失败 {entry.path}: {exc}")
+
+    async def _maybe_cleanup_page_data(self) -> None:
+        """每小时最多清理一次，由审计写入顺带触发。"""
+        now = time.monotonic()
+
+        if now - self._last_page_cleanup < 3600:
+            return
+
+        self._last_page_cleanup = now
+        await asyncio.to_thread(self._cleanup_expired_page_data)
+
     def _remove_preview_staging(self, record: Optional[dict]) -> None:
         if not record or not record.get("stagingDir"):
             return
@@ -467,47 +518,29 @@ class VoicePageManager:
 
         base, _, selector = parsed
 
-        for resource_id in self.voice_mgr.skin_voice_index.get(base, {}):
+        for resource_id in self.voice_mgr._match_skin_packages(base, selector):
             info = self.voice_mgr.skin_metadata.get(base, {}).get(resource_id, {})
-            reference = self.voice_mgr._skin_reference(base, resource_id)
-            reference_parsed = (
-                self.voice_mgr._parse_character_reference(reference)
-                if reference
-                else None
-            )
-            reference_selector = reference_parsed[2] if reference_parsed else None
-            aliases = {
-                resource_id,
-                str(info.get("name", "")).strip(),
-                str(info.get("directory", "")).strip(),
-                reference_selector,
-            }
+            directory = str(info.get("directory", "")).strip()
+            skin_name = str(info.get("name", "")).strip() or directory
 
-            if selector in aliases or character == reference:
-                directory = str(info.get("directory", "")).strip()
-                skin_name = str(info.get("name", "")).strip() or directory
+            if not self.voice_mgr._is_safe_component(
+                directory,
+                self.voice_mgr.MAX_SKIN_ID_LENGTH,
+            ):
+                break
 
-                if not self.voice_mgr._is_safe_component(
-                    directory,
-                    self.voice_mgr.MAX_SKIN_ID_LENGTH,
-                ):
-                    break
-
-                return base, resource_id, skin_name, directory
+            return base, resource_id, skin_name, directory
 
         raise ValueError("皮肤语音档案已失效，请重新扫描")
 
-    def _own_voice_path(
+    def _own_voice_dir(
         self,
         character: str,
         language: str,
-        voice: str,
     ) -> Path:
+        """档案在某语言下的语音目录，已确认位于语音树内。"""
         if language not in self.voice_mgr.LANGUAGE_MAP:
             raise ValueError("语言代码无效")
-
-        if voice not in self.voice_mgr.VOICE_DESCRIPTIONS:
-            raise ValueError("语音类型无效")
 
         parsed = self.voice_mgr._parse_character_reference(character)
 
@@ -527,14 +560,29 @@ class VoicePageManager:
                 "skin",
                 directory,
                 language,
-                f"{voice}.wav",
             )
         else:
-            target = self.voice_mgr._safe_path(
-                character_root,
-                language,
-                f"{voice}.wav",
-            )
+            target = self.voice_mgr._safe_path(character_root, language)
+
+        if target is None or not self._path_within(target, self.voices_dir):
+            raise ValueError("档案路径越界")
+
+        return target
+
+    def _own_voice_path(
+        self,
+        character: str,
+        language: str,
+        voice: str,
+    ) -> Path:
+        if voice not in self.voice_mgr.VOICE_DESCRIPTIONS:
+            raise ValueError("语音类型无效")
+
+        # 写入、回收都以这个路径为目标，文件本身也要确认没有借符号链接指到树外。
+        target = self.voice_mgr._safe_path(
+            self._own_voice_dir(character, language),
+            f"{voice}.wav",
+        )
 
         if target is None or not self._path_within(target, self.voices_dir):
             raise ValueError("档案路径越界")
@@ -565,8 +613,7 @@ class VoicePageManager:
         return candidate
 
     @staticmethod
-    def _file_metadata(path: Path) -> dict:
-        stat = path.stat()
+    def _stat_metadata(stat: os.stat_result) -> dict:
         return {
             "bytes": stat.st_size,
             "updatedAt": datetime.fromtimestamp(
@@ -575,71 +622,94 @@ class VoicePageManager:
             ).isoformat(timespec="seconds"),
         }
 
-    def _voice_status(
+    def _wav_entries(
+        self,
+        directory: Optional[Path],
+    ) -> dict[str, tuple[Path, os.stat_result, bool]]:
+        """目录下名称合法的 WAV：{语音: (路径, stat, 是否有效)}。
+
+        调用方已确认目录位于语音树内；条目来自 scandir 且不跟随符号链接，
+        因此不必逐个 resolve()。有效性按 (大小, 修改时间) 复用扫描时的校验结果。
+        """
+        result = {}
+
+        if directory is None:
+            return result
+
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    name, suffix = os.path.splitext(entry.name)
+
+                    try:
+                        if (
+                            suffix.lower() == ".wav"
+                            and name in self.voice_mgr.VOICE_DESCRIPTIONS
+                            and not entry.is_symlink()
+                            and entry.is_file(follow_symlinks=False)
+                        ):
+                            result[name] = (
+                                Path(entry.path),
+                                entry.stat(follow_symlinks=False),
+                                self.voice_mgr._is_valid_wav_entry(entry),
+                            )
+                    except OSError:
+                        continue
+        except OSError:
+            pass
+
+        return result
+
+    def _voice_statuses(
         self,
         character: str,
         language: str,
-        voice: str,
-    ) -> dict:
-        own = self._own_voice_path(character, language, voice)
+    ) -> list[tuple[dict, Optional[Path]]]:
+        """档案在某语言下每条语音的状态，附带可读取的文件路径（缺失或损坏时为 None）。"""
+        own = self._wav_entries(self._own_voice_dir(character, language))
+        fallback = {}
+        parsed = self.voice_mgr._parse_character_reference(character)
 
-        try:
-            own_exists = own.is_file()
-            own_valid = own_exists and self.voice_mgr._is_valid_wav_file(own)
-        except OSError:
-            own_exists = False
-            own_valid = False
+        if parsed and parsed[1]:
+            fallback_dir = self.voice_mgr._safe_path(self.voices_dir, parsed[0], language)
 
-        if own_valid:
-            return {
-                "voice": voice,
-                "status": "own",
-                "source": "当前档案",
-                "deletable": True,
-                "replaceable": True,
-                **self._file_metadata(own),
-            }
+            if fallback_dir is not None and self._path_within(fallback_dir, self.voices_dir):
+                fallback = self._wav_entries(fallback_dir)
 
-        if own_exists:
-            return {
-                "voice": voice,
-                "status": "damaged",
-                "source": "当前档案（损坏）",
-                "deletable": True,
-                "replaceable": True,
-                **self._file_metadata(own),
-            }
+        result = []
 
-        fallback = self._fallback_voice_path(character, language, voice)
+        for voice in self.voice_mgr.VOICE_DESCRIPTIONS:
+            item = {"voice": voice, "replaceable": True}
 
-        try:
-            fallback_valid = bool(
-                fallback
-                and fallback.is_file()
-                and self.voice_mgr._is_valid_wav_file(fallback)
-            )
-        except OSError:
-            fallback_valid = False
+            if voice in own:
+                path, stat, valid = own[voice]
+                item.update(
+                    status="own" if valid else "damaged",
+                    source="当前档案" if valid else "当前档案（损坏）",
+                    deletable=True,
+                    **self._stat_metadata(stat),
+                )
+                result.append((item, path if valid else None))
+            elif voice in fallback and fallback[voice][2]:
+                path, stat, _ = fallback[voice]
+                item.update(
+                    status="fallback",
+                    source="基础语音回退",
+                    deletable=False,
+                    **self._stat_metadata(stat),
+                )
+                result.append((item, path))
+            else:
+                item.update(
+                    status="missing",
+                    source="缺失",
+                    deletable=False,
+                    bytes=0,
+                    updatedAt=None,
+                )
+                result.append((item, None))
 
-        if fallback_valid and fallback is not None:
-            return {
-                "voice": voice,
-                "status": "fallback",
-                "source": "基础语音回退",
-                "deletable": False,
-                "replaceable": True,
-                **self._file_metadata(fallback),
-            }
-
-        return {
-            "voice": voice,
-            "status": "missing",
-            "source": "缺失",
-            "deletable": False,
-            "replaceable": True,
-            "bytes": 0,
-            "updatedAt": None,
-        }
+        return result
 
     def _archive_summary(
         self,
@@ -805,7 +875,7 @@ class VoicePageManager:
 
             self._storage_cache = (generation, (total_bytes, wav_files))
 
-        trash_items = len(self._list_trash_items())
+        trash_items = self._count_trash_items()
         return {
             "bytes": total_bytes,
             "wavFiles": wav_files,
@@ -835,8 +905,30 @@ class VoicePageManager:
                     handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
                     handle.flush()
                     os.fsync(handle.fileno())
+
+                self._audit_lines += 1
+
+                if self._audit_lines > constants.MAX_AUDIT_LINES:
+                    self._trim_audit()
             except OSError as exc:
                 logger.warning(f"写入语音管理审计日志失败: {exc}")
+
+        await self._maybe_cleanup_page_data()
+
+    def _count_audit_lines(self) -> int:
+        try:
+            with self.audit_file.open("rb") as handle:
+                return sum(1 for _ in handle)
+        except OSError:
+            return 0
+
+    def _trim_audit(self) -> None:
+        """只保留最近 MAX_AUDIT_ITEMS 条审计记录。"""
+        with self.audit_file.open("r", encoding="utf-8") as handle:
+            lines = deque(handle, maxlen=self.MAX_AUDIT_ITEMS)
+
+        self.voice_mgr._atomic_write_bytes(self.audit_file, "".join(lines).encode("utf-8"))
+        self._audit_lines = len(lines)
 
     def _read_audit(self, limit: int = 100) -> list[dict]:
         limit = max(1, min(int(limit), self.MAX_AUDIT_ITEMS))
@@ -1003,8 +1095,10 @@ class VoicePageManager:
         )
         summary = self._archive_summary(character)
 
-        voices = [self._voice_status(character, language, voice)
-                  for voice in self.voice_mgr.VOICE_DESCRIPTIONS]
+        try:
+            voices = [item for item, _ in self._voice_statuses(character, language)]
+        except ValueError as exc:
+            return error_response(str(exc), status_code=404)
 
         for item in voices:
             item["replaceToken"] = self._encode_token(
@@ -1092,17 +1186,11 @@ class VoicePageManager:
             compression=zipfile.ZIP_DEFLATED,
             compresslevel=6,
         ) as archive:
-            for voice in self.voice_mgr.VOICE_DESCRIPTIONS:
-                status = self._voice_status(character, language, voice)
-
-                if status["status"] not in {"own", "fallback"}:
-                    continue
-
-                path = self.voice_mgr.get_voice_path(character, voice, language)
-
+            for status, path in self._voice_statuses(character, language):
                 if path is None:
                     continue
 
+                voice = status["voice"]
                 folder = "fallback" if status["status"] == "fallback" else "voices"
                 archive.write(path, f"{folder}/{voice}.wav")
                 manifest["voices"].append(
@@ -1653,67 +1741,6 @@ class VoicePageManager:
             if record is None or not (Path(record["stagingDir"]) / "recovery.json").exists():
                 self._remove_preview_staging(record)
 
-    async def import_archive(self, token: str):
-        zip_path = None
-        staging_dir = None
-
-        try:
-            payload = self._decode_token(token)
-            character = self._canonical_character(payload.get("character"))
-            language = str(payload.get("language", "")).strip().lower()
-
-            if language not in self.voice_mgr.LANGUAGE_MAP:
-                raise ValueError("语言代码无效")
-
-            files = await request.files()
-            upload = files.get("file")
-
-            if not isinstance(upload, PluginUploadFile):
-                raise ValueError("请选择 ZIP 文件")
-
-            if Path(upload.filename or "").suffix.lower() != ".zip":
-                raise ValueError("仅支持 ZIP 文件")
-
-            zip_path = await self._save_upload(
-                upload,
-                suffix=".zip",
-                max_bytes=self.MAX_IMPORT_BYTES,
-            )
-
-            staging_dir = Path(tempfile.mkdtemp(prefix="stage-", dir=str(self.upload_dir)))
-            staged = await self._run_file_operation(self._stage_import, zip_path, staging_dir)
-            async with self._mutation_lock:
-                result = await self._run_file_operation(self._commit_import_files, character, language, staged)
-            backups = result["backups"]
-
-            await self.scan_callback(True)
-            await self._audit(
-                "import_archive",
-                f"{character}/{language}",
-                details={
-                    "imported": len(staged),
-                    "backups": backups,
-                },
-            )
-            return json_response(
-                {
-                    "imported": len(staged),
-                    "backups": backups,
-                    "character": character,
-                    "language": language,
-                }
-            )
-        except (OSError, ValueError, zipfile.BadZipFile) as exc:
-            if staging_dir is not None:
-                await self.scan_callback(True)
-                await self._audit("import_failed", character, details={"error": str(exc)})
-            return error_response(str(exc), status_code=400)
-        finally:
-            if zip_path is not None:
-                zip_path.unlink(missing_ok=True)
-            if staging_dir is not None and not (staging_dir / "recovery.json").exists():
-                shutil.rmtree(staging_dir, ignore_errors=True)
-
     def _commit_batch_remove(self, plan):
         with self.voice_mgr.file_lock:
             for item in plan:
@@ -1994,6 +2021,28 @@ class VoicePageManager:
 
         return item_dir, metadata
 
+    def _count_trash_items(self) -> int:
+        count = 0
+
+        try:
+            with os.scandir(self.trash_dir) as entries:
+                for entry in entries:
+                    try:
+                        if (
+                            self._TRASH_ID_RE.fullmatch(entry.name)
+                            and not entry.is_symlink()
+                            and entry.is_dir(follow_symlinks=False)
+                            and os.path.isfile(os.path.join(entry.path, "metadata.json"))
+                            and os.path.isfile(os.path.join(entry.path, "file.wav"))
+                        ):
+                            count += 1
+                    except OSError:
+                        continue
+        except OSError:
+            pass
+
+        return count
+
     def _list_trash_items(self) -> list[dict]:
         result = []
 
@@ -2209,20 +2258,26 @@ class VoicePageManager:
             missing = 0
             damaged = 0
 
+            # 计划按 (皮肤目录, 语言) 分组，每个目录只校验并列出一次。
+            directories: Dict[tuple, dict] = {}
+
             for item in plan:
-                parts = [character]
+                parts = (character,)
                 if item["skin_directory"]:
-                    parts.extend(("skin", item["skin_directory"]))
-                parts.extend((item["language"], f"{item['voice']}.wav"))
-                path = self.voice_mgr._safe_path(self.voices_dir, *parts)
-                if path is None:
-                    raise ValueError("语音目标路径无效")
-                if self.voice_mgr._is_valid_wav_file(path):
+                    parts += ("skin", item["skin_directory"])
+                parts += (item["language"],)
+                if parts not in directories:
+                    directory = self.voice_mgr._safe_path(self.voices_dir, *parts)
+                    if directory is None or not self._path_within(directory, self.voices_dir):
+                        raise ValueError("语音目标路径无效")
+                    directories[parts] = self._wav_entries(directory)
+                local = directories[parts].get(item["voice"])
+                if local and local[2]:
                     if item["force_redownload"]:
                         overwritten += 1
                     else:
                         existing += 1
-                elif path.is_file():
+                elif local:
                     damaged += 1
                 else:
                     missing += 1
@@ -2350,11 +2405,41 @@ class VoicePageManager:
             }
         )
 
-    def _run_integrity(self, quarantine: bool) -> dict:
-        with self.voice_mgr.file_lock:
-            return self._run_integrity_locked(quarantine)
+    def _walk_wav_entries(self, directory: Path):
+        """递归产出 (所在目录是否在语音树内, DirEntry)，包含 WAV 符号链接本身，但不进入符号链接目录。
 
-    def _run_integrity_locked(self, quarantine: bool) -> dict:
+        每个目录只 resolve 一次：树内目录里的非符号链接条目必然也在树内。
+        """
+        inside = self._path_within(directory, self.voices_dir)
+        subdirs = []
+
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_symlink():
+                            if entry.name.lower().endswith(".wav"):
+                                yield inside, entry
+                        elif entry.is_dir(follow_symlinks=False):
+                            subdirs.append(Path(entry.path))
+                        elif entry.name.lower().endswith(".wav") and entry.is_file(
+                            follow_symlinks=False
+                        ):
+                            yield inside, entry
+                    except OSError:
+                        continue
+        except OSError:
+            return
+
+        for subdir in sorted(subdirs):
+            yield from self._walk_wav_entries(subdir)
+
+    def _run_integrity(self, quarantine: bool) -> dict:
+        """逐个读取 WAV 文件头核对。
+
+        核对期间不持有 file_lock，避免事件循环上需要这把锁的下载被卡住；
+        隔离搬移前在锁内确认文件没有变化。
+        """
         checked = 0
         valid = 0
         issues = []
@@ -2369,24 +2454,25 @@ class VoicePageManager:
             )
         )
 
-        try:
-            paths = list(self.voices_dir.rglob("*.wav"))
-        except OSError:
-            paths = []
-
-        for path in paths:
+        for inside, entry in self._walk_wav_entries(self.voices_dir):
             checked += 1
+            path = Path(entry.path)
             issue = None
+            signature = None
 
             try:
-                if path.is_symlink():
+                if entry.is_symlink():
                     issue = "符号链接"
-                elif not self._path_within(path, self.voices_dir):
+                elif not inside:
                     issue = "路径越界"
-                elif path.stem not in self.voice_mgr.VOICE_DESCRIPTIONS:
-                    issue = "未知语音名称"
-                elif not self.voice_mgr._is_valid_wav_file(path):
-                    issue = "WAV 文件损坏"
+                else:
+                    stat = entry.stat(follow_symlinks=False)
+                    signature = (stat.st_size, stat.st_mtime_ns)
+
+                    if os.path.splitext(entry.name)[0] not in self.voice_mgr.VOICE_DESCRIPTIONS:
+                        issue = "未知语音名称"
+                    elif not self.voice_mgr._is_valid_wav_file(path):
+                        issue = "WAV 文件损坏"
             except OSError:
                 issue = "文件不可读"
 
@@ -2395,8 +2481,8 @@ class VoicePageManager:
                 continue
 
             try:
-                relative = path.resolve().relative_to(self.voices_dir.resolve())
-            except (OSError, ValueError):
+                relative = path.relative_to(self.voices_dir)
+            except ValueError:
                 relative = Path(path.name)
 
             item = {
@@ -2405,17 +2491,21 @@ class VoicePageManager:
                 "isolated": False,
             }
 
-            if (
-                quarantine
-                and path.is_file()
-                and not path.is_symlink()
-                and self._path_within(path, self.voices_dir)
-            ):
-                destination = quarantine_root / relative
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                path.replace(destination)
-                isolated += 1
-                item["isolated"] = True
+            if quarantine and inside and signature is not None:
+                with self.voice_mgr.file_lock:
+                    try:
+                        current = path.stat()
+                        unchanged = (current.st_size, current.st_mtime_ns) == signature
+                    except OSError:
+                        unchanged = False
+
+                    # 核对后被下载或替换过的文件不再隔离，交给下一次检查。
+                    if unchanged:
+                        destination = quarantine_root / relative
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        path.replace(destination)
+                        isolated += 1
+                        item["isolated"] = True
 
             issues.append(item)
 
@@ -2470,6 +2560,8 @@ class VoicePageManager:
         return json_response(record, status_code=202)
 
     async def bindings(self):
+        # 启动扫描完成前索引为空，等它结束再判断绑定是否可播放。
+        await self.scan_callback(False)
         items = []
 
         for trigger, info in sorted(self.custom_mappings.items()):
@@ -2658,6 +2750,7 @@ class VoicePageManager:
     async def operators(self):
         """PRTS 干员列表，并标出本地已有基础语音的干员。"""
         refresh = str(request.query.get("refresh", "")).strip() in {"1", "true"}
+        await self.scan_callback(False)
         catalog = await self.voice_mgr.get_operator_catalog(force_refresh=refresh)
         local = {
             character

@@ -111,22 +111,14 @@ class MyPlugin(Star):
                     logger.warning(f"忽略格式错误的自定义指令: {trigger!r}")
                     continue
 
-                character = info.get("character")
-                voice = info.get("voice")
-                lang = info.get("lang")
-
-                if (
-                    not self.voice_mgr.validate_character(character)
-                    or voice not in self.voice_mgr.VOICE_DESCRIPTIONS
-                    or (lang is not None and lang not in self.voice_mgr.LANGUAGE_MAP)
-                ):
+                if not self._valid_binding(info):
                     logger.warning(f"忽略字段无效的自定义指令: {trigger!r}")
                     continue
 
                 result[trigger.strip()] = {
-                    "character": character.strip(),
-                    "voice": voice,
-                    "lang": lang,
+                    "character": info["character"].strip(),
+                    "voice": info["voice"],
+                    "lang": info.get("lang"),
                 }
 
             return result
@@ -190,6 +182,8 @@ class MyPlugin(Star):
 
     async def _initialize_resources(self) -> None:
         try:
+            # 首次扫描要读每个 WAV 的文件头，放到线程里，不在插件加载时阻塞事件循环。
+            await asyncio.to_thread(self.voice_mgr.scan_voice_files)
             await self.voice_mgr.migrate_legacy_skin_directories(
                 self.plugin_config.download_languages,
             )
@@ -364,6 +358,24 @@ class MyPlugin(Star):
 
         return f"{reason}：\n{option_lines}\n例如：/mrfz {options[0]} 问候 中文"
 
+    def _resolve_or_prompt(self, character: str) -> Tuple[str, Optional[str]]:
+        """规范化角色引用，返回 (角色, 提示)；皮肤不明确时提示非空，应直接回复给用户。"""
+        resolved, options = self.voice_mgr.resolve_character_reference(character)
+
+        if options and not resolved:
+            return character, self._skin_choice_message(character, options)
+
+        return resolved or character, None
+
+    def _valid_binding(self, info: dict) -> bool:
+        """检查快捷绑定的角色、语音、语言字段。"""
+        lang = info.get("lang")
+        return (
+            self.voice_mgr.validate_character(info.get("character"))
+            and info.get("voice") in self.voice_mgr.VOICE_DESCRIPTIONS
+            and (lang is None or lang in self.voice_mgr.LANGUAGE_MAP)
+        )
+
     @staticmethod
     def _valid_trigger(trigger: object) -> bool:
         """检查自定义触发词是否合法。"""
@@ -391,6 +403,14 @@ class MyPlugin(Star):
         remaining = self._cooldowns.get(key, 0.0) - now
 
         if remaining <= 0:
+            # 冷却到期的键没有用了，字典变大时顺手清掉，避免按发送者无限增长。
+            if len(self._cooldowns) >= 256:
+                self._cooldowns = {
+                    current: until
+                    for current, until in self._cooldowns.items()
+                    if until > now
+                }
+
             self._cooldowns[key] = now + seconds
             return 0.0
 
@@ -545,17 +565,17 @@ class MyPlugin(Star):
             logger.warning(f"忽略格式错误的自定义指令: {msg!r}")
             return
 
-        character = cfg.get("character")
-        voice = cfg.get("voice")
-        lang_code = cfg.get("lang")
-
-        if (
-            not self.voice_mgr.validate_character(character)
-            or voice not in self.voice_mgr.VOICE_DESCRIPTIONS
-            or (lang_code is not None and lang_code not in self.voice_mgr.LANGUAGE_MAP)
-        ):
+        if not self._valid_binding(cfg):
             logger.warning(f"忽略字段无效的自定义指令: {msg!r}")
             return
+
+        # 启动扫描完成前索引还是空的，命中触发词时先等它结束。
+        if not self._startup_task.done():
+            await self._startup_task
+
+        character = cfg["character"]
+        voice = cfg["voice"]
+        lang_code = cfg.get("lang")
 
         resolved_character, options = self.voice_mgr.resolve_character_reference(
             character
@@ -650,21 +670,11 @@ class MyPlugin(Star):
             yield event.plain_result("角色名称不合法")
             return
 
-        resolved_character, skin_options = self.voice_mgr.resolve_character_reference(
-            character
-        )
+        character, prompt = self._resolve_or_prompt(character)
 
-        if skin_options and not resolved_character:
-            yield event.plain_result(
-                self._skin_choice_message(
-                    character,
-                    skin_options,
-                )
-            )
+        if prompt:
+            yield event.plain_result(prompt)
             return
-
-        if resolved_character:
-            character = resolved_character
 
         # 检查角色是否存在
         if character not in self.voice_mgr.voice_index:
@@ -688,23 +698,11 @@ class MyPlugin(Star):
                     "...已自动切换。"
                 )
 
-                character = guessed_character
+                character, prompt = self._resolve_or_prompt(guessed_character)
 
-                resolved_character, skin_options = (
-                    self.voice_mgr.resolve_character_reference(character)
-                )
-
-                if skin_options and not resolved_character:
-                    yield event.plain_result(
-                        self._skin_choice_message(
-                            character,
-                            skin_options,
-                        )
-                    )
+                if prompt:
+                    yield event.plain_result(prompt)
                     return
-
-                if resolved_character:
-                    character = resolved_character
 
             if not guessed_character:
                 if not self.plugin_config.auto_download:
@@ -734,21 +732,11 @@ class MyPlugin(Star):
 
                 await self._scan_if_needed()
 
-                resolved_character, skin_options = (
-                    self.voice_mgr.resolve_character_reference(character)
-                )
+                character, prompt = self._resolve_or_prompt(character)
 
-                if skin_options and not resolved_character:
-                    yield event.plain_result(
-                        self._skin_choice_message(
-                            character,
-                            skin_options,
-                        )
-                    )
+                if prompt:
+                    yield event.plain_result(prompt)
                     return
-
-                if resolved_character:
-                    character = resolved_character
 
                 if character not in self.voice_mgr.voice_index:
                     yield event.plain_result("下载完成，但没有发现可播放的语音文件。")
@@ -923,21 +911,11 @@ class MyPlugin(Star):
 
         await self._scan_if_needed()
 
-        resolved_character, skin_options = self.voice_mgr.resolve_character_reference(
-            character
-        )
+        character, prompt = self._resolve_or_prompt(character)
 
-        if skin_options and not resolved_character:
-            yield event.plain_result(
-                self._skin_choice_message(
-                    character,
-                    skin_options,
-                ).replace("/mrfz ", "/mrfz_bind 触发词 ", 1)
-            )
+        if prompt:
+            yield event.plain_result(prompt.replace("/mrfz ", "/mrfz_bind 触发词 ", 1))
             return
-
-        if resolved_character:
-            character = resolved_character
 
         if character not in self.voice_mgr.voice_index:
             yield event.plain_result("角色语音尚未下载，无法绑定")

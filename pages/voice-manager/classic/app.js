@@ -1,4 +1,26 @@
 const bridge = window.AstrBotPluginPage;
+const {
+  LANGUAGES,
+  POLL_ACTIVE_MS,
+  POLL_IDLE_MS,
+  escapeHtml,
+  formatBytes,
+  formatDate,
+  languageName,
+  errorMessage,
+  createRun,
+  quietly,
+  base64Blob,
+  audioKey,
+  cachedAudio,
+  cacheAudio,
+  exportRequest,
+  confirmPreview,
+  languageOptions,
+  fetchLanguageChecks,
+  applyFetchDefaults,
+  archiveOptions,
+} = window.VoiceCommon;
 let settings;
 
 const VOICE_TYPES = [
@@ -42,66 +64,27 @@ const VOICE_TYPES = [
   "周年庆典",
 ];
 
-const LANGUAGES = [
-  { code: "fy", name: "方言" },
-  { code: "cn", name: "中文" },
-  { code: "jp", name: "日语" },
-  { code: "us", name: "英语" },
-  { code: "kr", name: "韩语" },
-  { code: "it", name: "意语" },
-  { code: "ru", name: "俄语" },
-  { code: "de", name: "德语" },
-  { code: "es", name: "西班牙语" },
-  { code: "fr", name: "法语" },
-];
-
 const state = {
   view: "overview",
-  overview: null,
+  // 全部档案；筛选在本地完成，快捷绑定的下拉框也用这份完整列表。
   archives: [],
   archiveDetail: null,
+  bindings: [],
+  aliases: [],
   pendingReplace: null,
-  audioUrl: null,
-  taskTimer: null,
+  pollTimer: null,
+  hasActiveTasks: false,
   taskSignature: "",
+  taskRenderSignature: "",
   archiveTimer: null,
   detailSequence: 0,
   archiveSequence: 0,
   audioSequence: 0,
+  taskSequence: 0,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function formatBytes(bytes) {
-  const value = Number(bytes || 0);
-  if (!Number.isFinite(value) || value <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
-  const amount = value / 1024 ** index;
-  return `${amount >= 100 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
-}
-
-function formatDate(value) {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return new Intl.DateTimeFormat(bridge.getLocale?.() || "zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
-}
 
 function initials(name) {
   const clean = String(name || "?").replace(/皮肤.*$/, "").trim();
@@ -118,20 +101,7 @@ function toast(message, type = "info") {
   window.setTimeout(() => node.remove(), 4200);
 }
 
-function errorMessage(error) {
-  return error instanceof Error ? error.message : String(error || "操作失败");
-}
-
-async function run(action, { success = null, silent = false } = {}) {
-  try {
-    const result = await action();
-    if (success) toast(success, "success");
-    return result;
-  } catch (error) {
-    if (!silent) toast(errorMessage(error), "error");
-    throw error;
-  }
-}
+const run = createRun(toast);
 
 function setConnection(connected, label) {
   $("#connection-label").textContent = label;
@@ -150,34 +120,22 @@ function switchView(view) {
   $("#sidebar").classList.remove("is-open");
   window.scrollTo({ top: 0, behavior: "smooth" });
 
-  if (view === "overview") loadOverview();
-  if (view === "archives") loadArchives();
-  if (view === "tasks") loadTasks();
-  if (view === "integrity") loadIntegrity();
-  if (view === "bindings") loadBindings();
-  if (view === "aliases") loadAliases();
-  if (view === "recovery") loadRecovery();
-  if (view === "settings") settings.load();
+  const loaders = {
+    overview: loadOverview,
+    archives: loadArchives,
+    tasks: () => loadTasks(),
+    integrity: loadIntegrity,
+    bindings: loadBindings,
+    aliases: loadAliases,
+    recovery: loadRecovery,
+    settings: () => settings.load(),
+  };
+  loaders[view]?.().catch(() => {});
 }
 
 function renderLanguages() {
-  const archiveSelect = $("#archive-language");
-  archiveSelect.innerHTML =
-    '<option value="all">全部语言</option>' +
-    LANGUAGES.map(
-      (item) => `<option value="${item.code}">${escapeHtml(item.name)}</option>`,
-    ).join("");
-
-  $("#fetch-languages").innerHTML = LANGUAGES.map(
-    (item) => `
-      <label class="check-item">
-        <input type="checkbox" name="fetch-language" value="${item.code}" ${
-          ["fy", "cn", "jp"].includes(item.code) ? "checked" : ""
-        } />
-        <span>${escapeHtml(item.name)}</span>
-      </label>
-    `,
-  ).join("");
+  $("#archive-language").innerHTML = '<option value="all">全部语言</option>' + languageOptions();
+  $("#fetch-languages").innerHTML = fetchLanguageChecks("check-item");
 }
 
 function statCard(code, label, value, note, icon) {
@@ -235,7 +193,6 @@ function renderAuditItems(items, target, emptyText = "暂无操作记录") {
 }
 
 function renderOverview(data) {
-  state.overview = data;
   const storage = data.storage || {};
   $("#overview-stats").innerHTML = [
     statCard("OPERATOR", "基础干员", data.operators, "已建立本地基础档案", "◫"),
@@ -305,17 +262,25 @@ function renderArchiveCards(items) {
     .join("");
 }
 
+// 与后端原来的筛选规则一致：关键词匹配档案名、干员名和皮肤名。
+function filteredArchives() {
+  const query = $("#archive-search").value.trim().toLowerCase();
+  const kind = $("#archive-kind").value;
+  const language = $("#archive-language").value;
+  return state.archives.filter(
+    (item) =>
+      (!query || [item.character, item.base, item.skinName || ""].join(" ").toLowerCase().includes(query)) &&
+      (!["operator", "skin"].includes(kind) || item.kind === kind) &&
+      (!language || language === "all" || (item.languages || []).includes(language)),
+  );
+}
+
 async function loadArchives() {
   const sequence = ++state.archiveSequence;
-  const params = {
-    q: $("#archive-search").value.trim(),
-    kind: $("#archive-kind").value,
-    language: $("#archive-language").value,
-  };
-  const data = await run(() => bridge.apiGet("page/archives", params));
+  const data = await run(() => bridge.apiGet("page/archives", { q: "", kind: "all", language: "all" }));
   if (sequence !== state.archiveSequence) return;
   state.archives = data.items || [];
-  renderArchiveCards(state.archives);
+  renderArchiveCards(filteredArchives());
 }
 
 function voiceActionButtons(item) {
@@ -413,23 +378,12 @@ function closeArchive() {
   document.body.style.overflow = "";
 }
 
-function base64Blob(encoded, mime) {
-  const binary = window.atob(encoded);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return new Blob([bytes], { type: mime || "audio/wav" });
-}
-
 function stopAudio() {
   state.audioSequence += 1;
   const player = $("#audio-player");
   player.pause();
   player.removeAttribute("src");
   player.load();
-  if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
-  state.audioUrl = null;
   $("#audio-dock").classList.add("is-hidden");
 }
 
@@ -438,55 +392,35 @@ async function previewVoice(voice) {
   if (!detail) return;
   const sequence = ++state.audioSequence;
   const detailSequence = state.detailSequence;
-  const data = await run(() =>
-    bridge.apiGet("page/audio", {
-      character: detail.character,
-      language: detail.language,
-      voice,
-    }),
-  );
-  if (sequence !== state.audioSequence || detailSequence !== state.detailSequence || detail !== state.archiveDetail) return;
-  if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
-  state.audioUrl = URL.createObjectURL(base64Blob(data.base64, data.mime));
+  const key = audioKey(detail, detail.voices?.find((item) => item.voice === voice) || { voice });
+  let url = cachedAudio(key);
+  if (!url) {
+    const data = await run(() =>
+      bridge.apiGet("page/audio", {
+        character: detail.character,
+        language: detail.language,
+        voice,
+      }),
+    );
+    const blob = await base64Blob(data.base64, data.mime);
+    if (sequence !== state.audioSequence || detailSequence !== state.detailSequence || detail !== state.archiveDetail) return;
+    url = cacheAudio(key, blob);
+  }
   const player = $("#audio-player");
-  player.src = state.audioUrl;
+  player.src = url;
   $("#audio-title").textContent = `${detail.character} / ${voice} / ${detail.language}`;
   $("#audio-dock").classList.remove("is-hidden");
   await player.play().catch(() => {});
 }
 
 async function downloadVoice(voice) {
-  const detail = state.archiveDetail;
-  await run(
-    () =>
-      bridge.download(
-        "page/export",
-        {
-          character: detail.character,
-          language: detail.language,
-          voice,
-        },
-        `${detail.base}-${detail.language}-${voice}.wav`,
-      ),
-    { success: "已开始下载语音文件" },
-  );
+  await run(() => exportRequest(bridge, state.archiveDetail, voice), { success: "已开始下载语音文件" });
 }
 
 async function exportCurrentArchive() {
   const detail = state.archiveDetail;
   if (!detail?.language) return;
-  await run(
-    () =>
-      bridge.download(
-        "page/export",
-        {
-          character: detail.character,
-          language: detail.language,
-        },
-        `${detail.base}-${detail.language}.zip`,
-      ),
-    { success: "已生成并下载语音包" },
-  );
+  await run(() => exportRequest(bridge, detail), { success: "已生成并下载语音包" });
 }
 
 function previewMetrics(items) {
@@ -526,13 +460,6 @@ function previewSample(items = []) {
   `;
 }
 
-async function discardOperationPreview(previewToken) {
-  if (!previewToken) return;
-  await bridge
-    .apiPost("page/preview/discard", { previewToken })
-    .catch(() => {});
-}
-
 function modalConfirm({
   eyebrow = "CONFIRM ACTION",
   title,
@@ -551,12 +478,7 @@ function modalConfirm({
   modal.returnValue = "";
   modal.showModal();
   return new Promise((resolve) => {
-    const onClose = () => {
-      modal.removeEventListener("close", onClose);
-      $("#modal-confirm").textContent = "确认";
-      resolve(modal.returnValue === "confirm");
-    };
-    modal.addEventListener("close", onClose);
+    modal.addEventListener("close", () => resolve(modal.returnValue === "confirm"), { once: true });
   });
 }
 
@@ -579,8 +501,7 @@ async function removeVoice(voice) {
       }),
     { success: "语音已移入回收站" },
   );
-  await openArchive(detail.character, detail.language);
-  await loadArchives();
+  await Promise.all([openArchive(detail.character, detail.language), loadArchives()]);
 }
 
 async function batchRemoveVoices() {
@@ -594,7 +515,7 @@ async function batchRemoveVoices() {
       voices,
     }),
   );
-  const confirmed = await modalConfirm({
+  const confirmed = await confirmPreview(bridge, preview, modalConfirm, {
     eyebrow: "BATCH RECYCLE PREVIEW",
     title: preview.title || "批量回收预览",
     message: "以下结果来自当前文件状态。确认后才会执行，预览后发生变化会被安全拦截。",
@@ -611,10 +532,7 @@ async function batchRemoveVoices() {
       previewSample(preview.sample),
     ].join(""),
   });
-  if (!confirmed) {
-    await discardOperationPreview(preview.previewToken);
-    return;
-  }
+  if (!confirmed) return;
   const result = await run(
     () =>
       bridge.apiPost("page/remove/batch", {
@@ -623,9 +541,7 @@ async function batchRemoveVoices() {
     { success: `${preview.affected} 个语音已移入回收站` },
   );
   if (!result?.removed) return;
-  await openArchive(detail.character, detail.language);
-  await loadArchives();
-  await loadOverview();
+  await Promise.all([openArchive(detail.character, detail.language), loadArchives(), loadOverview()]);
 }
 
 async function reloadArchiveDetail() {
@@ -635,13 +551,21 @@ async function reloadArchiveDetail() {
 }
 
 async function loadTasks({ silent = false } = {}) {
+  const sequence = ++state.taskSequence;
   try {
     const data = await run(() => bridge.apiGet("page/tasks"), { silent });
-    renderTasks(data.items || []);
-    return data.items || [];
+    const items = data.items || [];
+    // 轮询与手动刷新可能重叠，只采用最后发出的请求；内容没变时不重建列表，避免焦点丢失。
+    if (sequence !== state.taskSequence) return items;
+    const signature = JSON.stringify(items);
+    if (signature !== state.taskRenderSignature) {
+      renderTasks(items);
+      state.taskRenderSignature = signature;
+    }
+    return items;
   } catch (error) {
     if (!silent) throw error;
-    return [];
+    return null;
   }
 }
 
@@ -698,7 +622,7 @@ async function submitFetch(event) {
   const preview = await run(() =>
     bridge.apiPost("page/fetch/preview", requestPayload),
   );
-  const confirmed = await modalConfirm({
+  const confirmed = await confirmPreview(bridge, preview, modalConfirm, {
     eyebrow: "PRTS TASK PREVIEW",
     title: preview.title || `获取 ${character} 的语音资源`,
     message: `语言：${(preview.languageNames || []).join("、")}。确认后才会创建后台任务。`,
@@ -713,10 +637,7 @@ async function submitFetch(event) {
       previewWarnings(preview.warnings),
     ].join(""),
   });
-  if (!confirmed) {
-    await discardOperationPreview(preview.previewToken);
-    return;
-  }
+  if (!confirmed) return;
   await run(
     () =>
       bridge.apiPost("page/fetch", {
@@ -726,6 +647,7 @@ async function submitFetch(event) {
   );
   $("#fetch-character").value = "";
   await loadTasks();
+  schedulePoll(POLL_ACTIVE_MS);
 }
 
 function renderIntegrity(report) {
@@ -789,15 +711,13 @@ async function startIntegrity(quarantine) {
     { success: "完整性检查任务已创建" },
   );
   toast("任务完成后报告会自动刷新");
-}
-
-function languageName(code) {
-  return LANGUAGES.find((item) => item.code === code)?.name || code || "自动";
+  schedulePoll(POLL_ACTIVE_MS);
 }
 
 async function loadBindings() {
   const data = await run(() => bridge.apiGet("page/bindings"));
   const items = data.items || [];
+  state.bindings = items;
   $("#binding-empty").classList.toggle("is-hidden", items.length > 0);
   $("#binding-list").innerHTML = items
     .map(
@@ -824,7 +744,6 @@ async function loadBindings() {
       `,
     )
     .join("");
-  $("#binding-list").dataset.items = JSON.stringify(items);
 }
 
 async function ensureArchives() {
@@ -844,23 +763,12 @@ async function bindingModal(existing = null) {
     toast("请先下载至少一个语音档案", "error");
     return;
   }
-  const modal = $("#modal");
-  $("#modal-eyebrow").textContent = existing ? "EDIT QUICK BINDING" : "NEW QUICK BINDING";
-  $("#modal-title").textContent = existing ? "编辑快捷绑定" : "新建快捷绑定";
-  $("#modal-message").textContent = "绑定保存前会校验档案、语音类型和语言是否可播放。";
-  $("#modal-fields").innerHTML = `
+  const fields = `
     <label><span>触发词</span><input id="modal-trigger" maxlength="64" value="${escapeHtml(
       existing?.trigger || "",
     )}" ${existing ? "readonly" : ""} /></label>
     <label><span>目标档案</span><select id="modal-character">
-      ${archives
-        .map(
-          (item) =>
-            `<option value="${escapeHtml(item.character)}" ${
-              item.character === existing?.character ? "selected" : ""
-            }>${escapeHtml(item.kind === "skin" ? `${item.base} / ${item.skinName}` : item.base)}</option>`,
-        )
-        .join("")}
+      ${archiveOptions(archives, existing)}
     </select></label>
     <label><span>语音类型</span><select id="modal-voice">
       ${VOICE_TYPES.map(
@@ -872,26 +780,16 @@ async function bindingModal(existing = null) {
     </select></label>
     <label><span>语言</span><select id="modal-language">
       <option value="auto">自动选择</option>
-      ${LANGUAGES.map(
-        (item) =>
-          `<option value="${item.code}" ${item.code === existing?.language ? "selected" : ""}>${escapeHtml(
-            item.name,
-          )}</option>`,
-      ).join("")}
+      ${languageOptions(existing?.language)}
     </select></label>
   `;
-  $("#modal-confirm").className = "button button-primary";
-  $("#modal-confirm").textContent = "保存绑定";
-  modal.returnValue = "";
-  modal.showModal();
-  const confirmed = await new Promise((resolve) => {
-    const onClose = () => {
-      modal.removeEventListener("close", onClose);
-      resolve(modal.returnValue === "confirm");
-    };
-    modal.addEventListener("close", onClose);
+  const confirmed = await modalConfirm({
+    eyebrow: existing ? "EDIT QUICK BINDING" : "NEW QUICK BINDING",
+    title: existing ? "编辑快捷绑定" : "新建快捷绑定",
+    message: "绑定保存前会校验档案、语音类型和语言是否可播放。",
+    fields,
+    confirmLabel: "保存绑定",
   });
-  $("#modal-confirm").textContent = "确认";
   if (!confirmed) return;
   await run(
     () =>
@@ -924,6 +822,7 @@ async function removeBinding(trigger) {
 async function loadAliases() {
   const data = await run(() => bridge.apiGet("page/aliases"));
   const items = data.items || [];
+  state.aliases = items;
   $("#alias-empty").classList.toggle("is-hidden", items.length > 0);
   $("#alias-list").innerHTML = items
     .map(
@@ -948,15 +847,10 @@ async function loadAliases() {
       `,
     )
     .join("");
-  $("#alias-list").dataset.items = JSON.stringify(items);
 }
 
 async function aliasModal(existing = null) {
-  const modal = $("#modal");
-  $("#modal-eyebrow").textContent = existing ? "EDIT OPERATOR ALIAS" : "NEW OPERATOR ALIAS";
-  $("#modal-title").textContent = existing ? "编辑干员别称" : "新增干员别称";
-  $("#modal-message").textContent = "别称立即用于播放、下载和快捷绑定；标准干员名可直接填写。";
-  $("#modal-fields").innerHTML = `
+  const fields = `
     <label><span>别称</span><input id="modal-alias" maxlength="80" value="${escapeHtml(
       existing?.alias || "",
     )}" ${existing ? "readonly" : ""} /></label>
@@ -964,18 +858,13 @@ async function aliasModal(existing = null) {
       existing?.character || "",
     )}" /></label>
   `;
-  $("#modal-confirm").className = "button button-primary";
-  $("#modal-confirm").textContent = "保存别称";
-  modal.returnValue = "";
-  modal.showModal();
-  const confirmed = await new Promise((resolve) => {
-    const onClose = () => {
-      modal.removeEventListener("close", onClose);
-      resolve(modal.returnValue === "confirm");
-    };
-    modal.addEventListener("close", onClose);
+  const confirmed = await modalConfirm({
+    eyebrow: existing ? "EDIT OPERATOR ALIAS" : "NEW OPERATOR ALIAS",
+    title: existing ? "编辑干员别称" : "新增干员别称",
+    message: "别称立即用于播放、下载和快捷绑定；标准干员名可直接填写。",
+    fields,
+    confirmLabel: "保存别称",
   });
-  $("#modal-confirm").textContent = "确认";
   if (!confirmed) return;
   await run(
     () =>
@@ -1044,8 +933,7 @@ async function restoreTrash(id) {
     () => bridge.apiPost("page/restore", { id }),
     { success: "语音文件已恢复" },
   );
-  await loadRecovery();
-  await loadOverview();
+  await Promise.all([loadRecovery(), loadOverview()]);
 }
 
 async function purgeTrash(id) {
@@ -1069,8 +957,7 @@ async function rescan() {
     { success: "语音索引已重建" },
   );
   state.archives = [];
-  await loadOverview();
-  if (state.view === "archives") await loadArchives();
+  await Promise.all([loadOverview(), state.view === "archives" ? loadArchives() : null]);
 }
 
 function bindEvents() {
@@ -1083,25 +970,31 @@ function bindEvents() {
   $("#mobile-menu").addEventListener("click", () => {
     $("#sidebar").classList.toggle("is-open");
   });
-  $("#overview-rescan").addEventListener("click", rescan);
-  $("#archives-refresh").addEventListener("click", loadArchives);
-  $("#archive-kind").addEventListener("change", loadArchives);
-  $("#archive-language").addEventListener("change", loadArchives);
+  $("#overview-rescan").addEventListener("click", quietly(rescan));
+  $("#archives-refresh").addEventListener("click", quietly(loadArchives));
+  // 档案筛选在本地完成，不再每次按键请求后端。
+  const filterArchives = () => renderArchiveCards(filteredArchives());
+  $("#archive-kind").addEventListener("change", filterArchives);
+  $("#archive-language").addEventListener("change", filterArchives);
   $("#archive-search").addEventListener("input", () => {
     window.clearTimeout(state.archiveTimer);
-    state.archiveTimer = window.setTimeout(loadArchives, 220);
+    state.archiveTimer = window.setTimeout(filterArchives, 120);
   });
-  $("#archive-grid").addEventListener("click", (event) => {
-    const card = event.target.closest("[data-archive]");
-    if (card) openArchive(card.dataset.archive);
-  });
+  $("#archive-grid").addEventListener(
+    "click",
+    quietly((event) => {
+      const card = event.target.closest("[data-archive]");
+      if (card) return openArchive(card.dataset.archive);
+    }),
+  );
   $$("[data-close-drawer]").forEach((node) => {
     node.addEventListener("click", closeArchive);
   });
-  $("#drawer-language").addEventListener("change", (event) => {
-    openArchive(state.archiveDetail.character, event.target.value);
-  });
-  $("#drawer-export").addEventListener("click", exportCurrentArchive);
+  $("#drawer-language").addEventListener(
+    "change",
+    quietly((event) => openArchive(state.archiveDetail.character, event.target.value)),
+  );
+  $("#drawer-export").addEventListener("click", quietly(exportCurrentArchive));
   $("#drawer-select-all").addEventListener("click", () => {
     const selectable = $$(
       "[data-voice-select]:not(:disabled)",
@@ -1113,8 +1006,8 @@ function bindEvents() {
     });
     updateArchiveSelection();
   });
-  $("#drawer-batch-remove").addEventListener("click", batchRemoveVoices);
-  $("#drawer-import").addEventListener("change", async (event) => {
+  $("#drawer-batch-remove").addEventListener("click", quietly(batchRemoveVoices));
+  $("#drawer-import").addEventListener("change", quietly(async (event) => {
     const file = event.target.files?.[0];
     const detail = state.archiveDetail;
     event.target.value = "";
@@ -1122,7 +1015,7 @@ function bindEvents() {
     const preview = await run(() =>
       bridge.upload(`page/import/preview/${detail.importToken}`, file),
     );
-    const confirmed = await modalConfirm({
+    const confirmed = await confirmPreview(bridge, preview, modalConfirm, {
       eyebrow: "BATCH IMPORT PREVIEW",
       title: preview.title || `导入 ${detail.base} / ${languageName(detail.language)}`,
       message: "ZIP 已完成安全校验。确认后才会写入当前档案。",
@@ -1152,10 +1045,7 @@ function bindEvents() {
         ),
       ].join(""),
     });
-    if (!confirmed) {
-      await discardOperationPreview(preview.previewToken);
-      return;
-    }
+    if (!confirmed) return;
     await run(
       () =>
         bridge.apiPost("page/import/commit", {
@@ -1163,10 +1053,9 @@ function bindEvents() {
         }),
       { success: "ZIP 语音包导入完成" },
     );
-    await reloadArchiveDetail();
-    await loadArchives();
-  });
-  $("#drawer-voice-list").addEventListener("click", async (event) => {
+    await Promise.all([reloadArchiveDetail(), loadArchives()]);
+  }));
+  $("#drawer-voice-list").addEventListener("click", quietly(async (event) => {
     const button = event.target.closest("[data-voice-action]");
     const row = event.target.closest(".voice-row");
     if (!button || !row) return;
@@ -1179,13 +1068,13 @@ function bindEvents() {
       state.pendingReplace = { voice, token: row.dataset.token };
       $("#replace-file").click();
     }
-  });
+  }));
   $("#drawer-voice-list").addEventListener("change", (event) => {
     if (event.target.matches("[data-voice-select]")) {
       updateArchiveSelection();
     }
   });
-  $("#replace-file").addEventListener("change", async (event) => {
+  $("#replace-file").addEventListener("change", quietly(async (event) => {
     const file = event.target.files?.[0];
     const pending = state.pendingReplace;
     event.target.value = "";
@@ -1195,13 +1084,12 @@ function bindEvents() {
       () => bridge.upload(`page/replace/${pending.token}`, file),
       { success: `“${pending.voice}”已替换，旧文件已备份` },
     );
-    await reloadArchiveDetail();
-    await loadArchives();
-  });
+    await Promise.all([reloadArchiveDetail(), loadArchives()]);
+  }));
   $("#audio-close").addEventListener("click", stopAudio);
-  $("#fetch-form").addEventListener("submit", submitFetch);
-  $("#tasks-refresh").addEventListener("click", () => loadTasks());
-  $("#task-list").addEventListener("click", async (event) => {
+  $("#fetch-form").addEventListener("submit", quietly(submitFetch));
+  $("#tasks-refresh").addEventListener("click", quietly(() => loadTasks()));
+  $("#task-list").addEventListener("click", quietly(async (event) => {
     const button = event.target.closest("[data-cancel-task]");
     if (!button) return;
     await run(
@@ -1209,59 +1097,64 @@ function bindEvents() {
       { success: "已发送取消请求" },
     );
     await loadTasks();
-  });
-  $("#integrity-scan").addEventListener("click", () => startIntegrity(false));
-  $("#integrity-quarantine").addEventListener("click", () => startIntegrity(true));
-  $("#binding-new").addEventListener("click", () => bindingModal());
-  $("#binding-list").addEventListener("click", async (event) => {
+  }));
+  $("#integrity-scan").addEventListener("click", quietly(() => startIntegrity(false)));
+  $("#integrity-quarantine").addEventListener("click", quietly(() => startIntegrity(true)));
+  $("#binding-new").addEventListener("click", quietly(() => bindingModal()));
+  $("#binding-list").addEventListener("click", quietly((event) => {
     const edit = event.target.closest("[data-edit-binding]");
     const remove = event.target.closest("[data-remove-binding]");
-    if (edit) {
-      const items = JSON.parse($("#binding-list").dataset.items || "[]");
-      await bindingModal(items.find((item) => item.trigger === edit.dataset.editBinding));
-    }
-    if (remove) await removeBinding(remove.dataset.removeBinding);
-  });
-  $("#alias-new").addEventListener("click", () => aliasModal());
-  $("#alias-list").addEventListener("click", async (event) => {
+    if (edit) return bindingModal(state.bindings.find((item) => item.trigger === edit.dataset.editBinding));
+    if (remove) return removeBinding(remove.dataset.removeBinding);
+  }));
+  $("#alias-new").addEventListener("click", quietly(() => aliasModal()));
+  $("#alias-list").addEventListener("click", quietly((event) => {
     const edit = event.target.closest("[data-edit-alias]");
     const remove = event.target.closest("[data-remove-alias]");
-    const items = JSON.parse($("#alias-list").dataset.items || "[]");
-    if (edit) {
-      await aliasModal(items.find((item) => item.alias === edit.dataset.editAlias));
-    }
-    if (remove) {
-      await removeAlias(items.find((item) => item.alias === remove.dataset.removeAlias));
-    }
-  });
-  $("#trash-list").addEventListener("click", async (event) => {
+    if (edit) return aliasModal(state.aliases.find((item) => item.alias === edit.dataset.editAlias));
+    if (remove) return removeAlias(state.aliases.find((item) => item.alias === remove.dataset.removeAlias));
+  }));
+  $("#trash-list").addEventListener("click", quietly((event) => {
     const restore = event.target.closest("[data-restore]");
     const purge = event.target.closest("[data-purge]");
-    if (restore) await restoreTrash(restore.dataset.restore);
-    if (purge) await purgeTrash(purge.dataset.purge);
-  });
-  $("#audit-refresh").addEventListener("click", loadRecovery);
+    if (restore) return restoreTrash(restore.dataset.restore);
+    if (purge) return purgeTrash(purge.dataset.purge);
+  }));
+  $("#audit-refresh").addEventListener("click", quietly(loadRecovery));
   window.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && $("#archive-drawer").classList.contains("is-open")) {
+    // 弹窗打开时 Esc 只关弹窗，不连带关掉抽屉。
+    if (event.key === "Escape" && !$("#modal").open && $("#archive-drawer").classList.contains("is-open")) {
       closeArchive();
     }
   });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) schedulePoll(0);
+  });
+}
+
+function schedulePoll(delay) {
+  window.clearTimeout(state.pollTimer);
+  state.pollTimer = window.setTimeout(pollBackgroundState, delay);
 }
 
 async function pollBackgroundState() {
+  if (document.hidden) return;
   const items = await loadTasks({ silent: true });
-  const hasRunning = items.some((item) => ["queued", "running"].includes(item.status));
-  const signature = items
-    .map((item) => `${item.id}:${item.status}:${item.finishedAt || ""}`)
-    .join("|");
-  const changed = signature !== state.taskSignature;
-  state.taskSignature = signature;
-  if (state.view === "integrity" && changed) {
-    await loadIntegrity().catch(() => {});
+  if (items) {
+    state.hasActiveTasks = items.some((item) => ["queued", "running"].includes(item.status));
+    const signature = items
+      .map((item) => `${item.id}:${item.status}:${item.finishedAt || ""}`)
+      .join("|");
+    const changed = signature !== state.taskSignature;
+    // 首次轮询只记录基线，初始化时概览已经加载过。
+    const firstPoll = state.taskSignature === "";
+    state.taskSignature = signature;
+    if (changed && !firstPoll) {
+      if (state.view === "integrity") await loadIntegrity().catch(() => {});
+      if (state.view === "overview" && !state.hasActiveTasks) await loadOverview().catch(() => {});
+    }
   }
-  if (state.view === "overview" && changed && !hasRunning) {
-    await loadOverview().catch(() => {});
-  }
+  schedulePoll(state.hasActiveTasks ? POLL_ACTIVE_MS : POLL_IDLE_MS);
 }
 
 async function initialize() {
@@ -1273,21 +1166,12 @@ async function initialize() {
   await bridge.ready();
   document.title = bridge.t?.("pages.voice-manager.title", "语音档案控制台") || "语音档案控制台";
   renderLanguages();
-  settings = window.VoiceSettings({bridge, root: $("#view-settings"), onChange(config) {
-    $$('input[name="fetch-language"]').forEach(input => { input.checked = config.auto_download_language.includes(languageName(input.value)); });
-    $("#fetch-skin").checked = config.auto_download_skin;
-  }});
-  await settings.load();
+  settings = window.VoiceSettings({ bridge, root: $("#view-settings"), onChange: applyFetchDefaults });
   bindEvents();
-  setConnection(true, "AstrBot 已连接");
-  await loadOverview();
-  state.taskTimer = window.setInterval(pollBackgroundState, 4500);
+  // 配置和概览互不依赖，一起加载，首屏不必多等一次往返。
+  await Promise.allSettled([settings.load(), loadOverview()]);
+  await pollBackgroundState();
 }
-
-window.addEventListener("beforeunload", () => {
-  window.clearInterval(state.taskTimer);
-  if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
-});
 
 initialize().catch((error) => {
   setConnection(false, "初始化失败");

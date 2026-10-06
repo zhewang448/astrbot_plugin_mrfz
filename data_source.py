@@ -11,6 +11,7 @@ import weakref
 from contextlib import AsyncExitStack
 from io import BytesIO
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from urllib.parse import quote, urlparse
 
@@ -41,6 +42,9 @@ class VoiceManager:
     RETRYABLE_PAGE_STATUSES = constants.RETRYABLE_PAGE_STATUSES
     VOICE_RESOURCE_MAP_VERSION = constants.VOICE_RESOURCE_MAP_VERSION
     MAX_WAV_VALIDITY_CACHE = constants.MAX_WAV_VALIDITY_CACHE
+    DOWNLOAD_CONCURRENCY = constants.DOWNLOAD_CONCURRENCY
+    # 语音名 -> 展示顺序，排序时直接查表。
+    _VOICE_ORDER = {name: index for index, name in enumerate(constants.VOICE_DESCRIPTIONS)}
 
     _SAFE_COMPONENT_RE = re.compile(
         r"^[\w\- .·()（）]+$",
@@ -114,6 +118,8 @@ class VoiceManager:
         self._language_routing_version = 0
         self._routing_refills: Dict[str, Dict[str, Any]] = {}
         self._routing_moves: Dict[str, Dict[str, str]] = {}
+        # 上次写入 voice_index.json 的内容，用于跳过没有变化的保存。
+        self._saved_index_bytes: Optional[bytes] = None
 
         for directory in (
             self.data_dir,
@@ -129,7 +135,7 @@ class VoiceManager:
 
         self._load_skin_metadata()
         self._load_operator_aliases()
-        self.scan_voice_files()
+        # 首次扫描要读每个 WAV 的文件头，由调用方放到线程里执行（见 main._initialize_resources）。
 
     def _load_operator_aliases(self) -> None:
         """加载用户自定义别称，并保留内置别称作为默认值。"""
@@ -476,22 +482,22 @@ class VoiceManager:
         except OSError:
             return []
 
-        order = {name: index for index, name in enumerate(self.VOICE_DESCRIPTIONS)}
-
         return sorted(
             set(found),
-            key=lambda name: order[name],
+            key=self._VOICE_ORDER.__getitem__,
         )
 
     @classmethod
     def _is_valid_wav_file(cls, path: Path) -> bool:
         """验证 RIFF chunk 边界，兼容 PCM 与带扩展 fmt 的 WAV。"""
         try:
-            if not path.is_file() or path.stat().st_size < 12:
+            info = path.stat()
+
+            if not S_ISREG(info.st_mode) or info.st_size < 12:
                 return False
 
             with path.open("rb") as handle:
-                return cls._valid_wav_stream(handle, path.stat().st_size)
+                return cls._valid_wav_stream(handle, info.st_size)
         except OSError:
             return False
 
@@ -545,11 +551,11 @@ class VoiceManager:
             target.parent.mkdir(parents=True, exist_ok=True)
 
             candidate = target
-            suffix = 1
+            attempt = 1
 
             while candidate.exists():
-                candidate = target.with_name(f"{target.name}.{suffix}")
-                suffix += 1
+                candidate = target.with_name(f"{target.name}.{attempt}")
+                attempt += 1
 
             path.replace(candidate)
             logger.warning(f"已隔离{reason}的语音文件: {path} -> {candidate}")
@@ -675,6 +681,33 @@ class VoiceManager:
         selector = name if len(same_name_ids) <= 1 else f"{name} · {resource_id}"
         return f"{character}皮肤[{selector}]"
 
+    def _match_skin_packages(
+        self,
+        character: str,
+        selector: Optional[str],
+    ) -> Dict[str, Optional[str]]:
+        """本地皮肤包里能被 selector 匹配上的项：{资源 ID: 皮肤引用}，按索引顺序。
+
+        selector 可以是资源 ID、展示名、目录名，或重名时带资源 ID 的引用选择器。
+        """
+        matched = {}
+        packages = self.skin_metadata.get(character, {})
+
+        for resource_id in self.skin_voice_index.get(character, {}):
+            info = packages.get(resource_id, {})
+            reference = self._skin_reference(character, resource_id)
+            aliases = {
+                resource_id,
+                str(info.get("name", "")).strip(),
+                str(info.get("directory", "")).strip(),
+                self._parse_character_reference(reference)[2] if reference else None,
+            }
+
+            if selector in aliases:
+                matched[resource_id] = reference
+
+        return matched
+
     def get_skin_options(self, character: str) -> List[str]:
         """返回某角色当前确实有文件的具体皮肤引用。"""
         options = []
@@ -759,26 +792,13 @@ class VoiceManager:
 
             return None, options
 
-        matches = []
-
-        for resource_id in packages:
-            info = self.skin_metadata.get(base_character, {}).get(resource_id, {})
-            reference = self._skin_reference(base_character, resource_id)
-            reference_selector = (
-                self._parse_character_reference(reference)[2] if reference else None
-            )
-            aliases = {
-                resource_id,
-                str(info.get("name", "")).strip(),
-                str(info.get("directory", "")).strip(),
-                reference_selector,
+        matches = sorted(
+            {
+                reference
+                for reference in self._match_skin_packages(base_character, selector).values()
+                if reference
             }
-
-            if selector in aliases:
-                if reference:
-                    matches.append(reference)
-
-        matches = sorted(set(matches))
+        )
 
         if len(matches) == 1:
             return matches[0], []
@@ -977,63 +997,88 @@ class VoiceManager:
             "skins": self.skin_voice_index,
             "skin_metadata": self.skin_metadata,
         }
+        data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        path = self.data_dir / "voice_index.json"
 
-        self._atomic_write_json(self.data_dir / "voice_index.json", payload)
+        # 定时扫描通常不改变索引，内容相同就不再整份重写并 fsync。
+        if data == self._saved_index_bytes and path.is_file():
+            return
+
+        self._atomic_write_bytes(path, data)
+        self._saved_index_bytes = data
 
     def _sort_voice_names(
         self,
         voices: List[str],
     ) -> List[str]:
-        order = {name: index for index, name in enumerate(self.VOICE_DESCRIPTIONS)}
-
         return sorted(
-            {voice for voice in voices if voice in order},
-            key=lambda voice: order[voice],
+            {voice for voice in voices if voice in self._VOICE_ORDER},
+            key=self._VOICE_ORDER.__getitem__,
         )
 
     @staticmethod
+    def _write_temp_file(
+        directory: Path,
+        name: str,
+        data: bytes,
+    ) -> str:
+        """把 data 写入 directory 下的临时文件并落盘，返回临时文件路径；失败时不留残片。"""
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{name}.",
+            suffix=".tmp",
+            dir=str(directory),
+        )
+
+        try:
+            handle = os.fdopen(fd, "wb")
+        except BaseException:
+            os.close(fd)
+            Path(temp_name).unlink(missing_ok=True)
+            raise
+
+        # fdopen 接管 fd 后由 with 关闭；不能再手动 os.close，
+        # 否则可能关掉别的线程刚分配到同一编号的文件。
+        try:
+            with handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except BaseException:
+            Path(temp_name).unlink(missing_ok=True)
+            raise
+
+        return temp_name
+
+    @classmethod
     def _atomic_write_json(
+        cls,
         path: Path,
         payload: Any,
+    ) -> None:
+        cls._atomic_write_bytes(
+            path,
+            json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+
+    @classmethod
+    def _atomic_write_bytes(
+        cls,
+        path: Path,
+        data: bytes,
     ) -> None:
         path.parent.mkdir(
             parents=True,
             exist_ok=True,
         )
-
-        fd, temp_name = tempfile.mkstemp(
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            dir=str(path.parent),
-        )
+        temp_name = cls._write_temp_file(path.parent, path.name, data)
 
         try:
-            with os.fdopen(
-                fd,
-                "w",
-                encoding="utf-8",
-            ) as handle:
-                json.dump(
-                    payload,
-                    handle,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                handle.flush()
-                os.fsync(handle.fileno())
-
             os.replace(
                 temp_name,
                 path,
             )
-        except Exception:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-
+        finally:
             Path(temp_name).unlink(missing_ok=True)
-            raise
 
     def get_available_voices(
         self,
@@ -1102,6 +1147,18 @@ class VoiceManager:
         ) = parsed
         base_character = self.resolve_operator_alias(base_character)
 
+        if is_skin:
+            resolved, _ = self.resolve_character_reference(character)
+
+            if not resolved:
+                return None
+        else:
+            resolved = base_character
+
+        # 扫描时已校验过的语音才可能播放；不在索引里就不必解析路径、读文件头。
+        if voice_name not in self.voice_files.get(resolved, {}).get(language, ()):
+            return None
+
         character_root = self._safe_path(
             self.voices_dir,
             base_character,
@@ -1117,31 +1174,16 @@ class VoiceManager:
                 f"{voice_name}.wav",
             )
         else:
-            resolved, _ = self.resolve_character_reference(character)
-
-            if not resolved:
-                return None
-
             resolved_selector = self._parse_character_reference(resolved)[2]
-            resource_id = None
-            directory = None
-
-            for current_id in self.skin_voice_index.get(base_character, {}):
-                info = self.skin_metadata.get(base_character, {}).get(current_id, {})
-                reference = self._skin_reference(base_character, current_id)
-                reference_selector = (
-                    self._parse_character_reference(reference)[2] if reference else None
-                )
-
-                if resolved_selector in {
-                    current_id,
-                    info.get("name"),
-                    info.get("directory"),
-                    reference_selector,
-                }:
-                    resource_id = current_id
-                    directory = info.get("directory")
-                    break
+            resource_id = next(
+                iter(self._match_skin_packages(base_character, resolved_selector)),
+                None,
+            )
+            directory = (
+                self.skin_metadata.get(base_character, {})
+                .get(resource_id, {})
+                .get("directory")
+            )
 
             if (
                 resource_id is None
@@ -1162,33 +1204,19 @@ class VoiceManager:
                 f"{voice_name}.wav",
             )
 
-        candidates = [candidate]
+        # 候选路径都由 _safe_path 生成，已确认位于角色目录内。
+        if candidate is not None and self._is_valid_wav_file(candidate):
+            return candidate
 
         if is_skin:
-            candidates.append(
-                self._safe_path(
-                    character_root,
-                    language,
-                    f"{voice_name}.wav",
-                )
+            fallback = self._safe_path(
+                character_root,
+                language,
+                f"{voice_name}.wav",
             )
 
-        for current_candidate in candidates:
-            if current_candidate is None:
-                continue
-
-            try:
-                if (
-                    current_candidate.is_file()
-                    and self._is_valid_wav_file(current_candidate)
-                    and self._path_is_within(
-                        current_candidate,
-                        character_root,
-                    )
-                ):
-                    return current_candidate
-            except OSError:
-                continue
+            if fallback is not None and self._is_valid_wav_file(fallback):
+                return fallback
 
         return None
 
@@ -1211,24 +1239,11 @@ class VoiceManager:
 
         return available[0]
 
-    @classmethod
-    def _language_from_label(
-        cls,
-        label: str,
-        voice_key: str = "",
-    ) -> Optional[str]:
-        """把 PRTS 路径标签映射为语言代码，插件不支持的语言返回 None。
-
-        标签取自语音页模板，如“日语”“中文-普通话(超新星)”“中文-方言”。
-        联动干员只有一条“联动”标签，语言要看资源目录（voice/ 为日语）。
-        """
-        return prts.language_from_label(label, voice_key)
-
     @staticmethod
     def _legacy_language_from_label(label: str) -> str:
         """3.8.0 之前的语言判定：只看标签里有没有“日/英/韩/方/意”，其余都当中文。
 
-        仅供迁移识别旧版本放错目录的语音；下载请用 _language_from_label。
+        仅供迁移识别旧版本放错目录的语音；下载请用 prts.language_from_label。
         """
         for keyword, language in (
             ("日", "jp"),
@@ -1647,14 +1662,21 @@ class VoiceManager:
                                     base_character, source["label"], source["voice_key"], source["language"],
                                 )
 
-                    for done, item in enumerate(plan, 1):
+                    # 各条目标文件互不相同，有限并发下载；进度按完成顺序上报。
+                    semaphore = asyncio.Semaphore(self.DOWNLOAD_CONCURRENCY)
+                    done = 0
+
+                    async def download(item: Dict[str, Any]) -> None:
+                        nonlocal done
                         language = item["language"]
                         remap_seen_languages.add(language)
-                        status, message = await self._download_with_retries(
-                            session, base_character, item["url"], language, item["voice"],
-                            skin_directory=item["skin_directory"],
-                            force_redownload=item["force_redownload"],
-                        )
+                        async with semaphore:
+                            status, message = await self._download_with_retries(
+                                session, base_character, item["url"], language, item["voice"],
+                                skin_directory=item["skin_directory"],
+                                force_redownload=item["force_redownload"],
+                            )
+                        done += 1
                         counts[status] += 1
                         display_name = (f"{base_character}皮肤[{item['skin_name']}]"
                                         if item["is_skin"] else base_character)
@@ -1663,6 +1685,8 @@ class VoiceManager:
                         if status == "failed":
                             remap_failed_languages.add(language)
                             logger.warning(f"下载失败 {display_name}/{language}/{item['voice']}: {message}")
+
+                    await asyncio.gather(*(download(item) for item in plan))
 
                     for language in remap_seen_languages:
                         if language not in remap_failed_languages and (
@@ -1795,7 +1819,7 @@ class VoiceManager:
                 logger.warning(f"{character} 旧版皮肤迁移暂缓，已保留原文件: {message}")
                 continue
 
-            self.scan_voice_files()
+            await asyncio.to_thread(self.scan_voice_files)
             packages = self.skin_voice_index.get(character, {})
             skin_root = self.voices_dir / character / "skin"
 
@@ -1857,7 +1881,7 @@ class VoiceManager:
                 except (OSError, RuntimeError, ValueError) as exc:
                     logger.warning(f"移除旧版皮肤目录失败 {legacy_dir}: {exc}")
 
-        self.scan_voice_files()
+        await asyncio.to_thread(self.scan_voice_files)
 
     async def refresh_local_skin_metadata(self) -> None:
         """
@@ -2481,35 +2505,16 @@ class VoiceManager:
                         "响应内容不是有效 WAV",
                     )
 
-            fd, temp_name = tempfile.mkstemp(
-                prefix=f".{path.name}.",
-                suffix=".tmp",
-                dir=str(save_dir),
-            )
+            temp_name = self._write_temp_file(save_dir, path.name, bytes(data))
 
             try:
-                with os.fdopen(
-                    fd,
-                    "wb",
-                ) as handle:
-                    handle.write(data)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-
                 async with self.mutation_lock:
                     with self.file_lock:
                         if self._file_signature(path) != signature:
-                            Path(temp_name).unlink(missing_ok=True)
                             return "failed", "目标文件在下载期间发生变化，请重新操作"
                         os.replace(temp_name, path)
-            except BaseException:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-
+            finally:
                 Path(temp_name).unlink(missing_ok=True)
-                raise
 
             return (
                 "downloaded",
@@ -2700,16 +2705,6 @@ class VoiceManager:
                     result.update(fetched)
         return result
 
-    async def _get_character_id_map(
-        self,
-        character: str,
-        *,
-        session: Optional[aiohttp.ClientSession] = None,
-    ) -> Optional[Dict[str, str]]:
-        """返回 {语言标签: PRTS 资源路径}，例如 {"日语": "voice/char_002_amiya"}。"""
-        record = await self._get_voice_record(character, session=session)
-        return record["paths"]
-
     async def ensure_assets(self) -> None:
         try:
             missing = set()
@@ -2863,33 +2858,7 @@ class VoiceManager:
                     "头像保存路径越界",
                 )
 
-            fd, temp_name = tempfile.mkstemp(
-                prefix=f".{save_path.name}.",
-                suffix=".tmp",
-                dir=str(self.assets_dir),
-            )
-
-            try:
-                with os.fdopen(
-                    fd,
-                    "wb",
-                ) as handle:
-                    handle.write(image_data)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-
-                os.replace(
-                    temp_name,
-                    save_path,
-                )
-            except BaseException:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-
-                Path(temp_name).unlink(missing_ok=True)
-                raise
+            self._atomic_write_bytes(save_path, bytes(image_data))
 
             logger.info(f"下载 {base_char} 头像成功")
 

@@ -9,7 +9,7 @@ import re
 # 这三个文件不是 Python，无法引用本常量。
 
 PLUGIN_NAME = "astrbot_plugin_mrfz"
-PLUGIN_VERSION = "3.8.2"
+PLUGIN_VERSION = "3.8.3"
 
 # ============================================================
 # 文件大小限制
@@ -34,7 +34,9 @@ VOICE_RECORD_VERSION = 2  # 新增小众语言，刷新旧解析记录与台词�
 AVATAR_THUMB_SIZE = 96  # 管理页头像缩略图边长（像素）
 MAX_AVATAR_BATCH = 60  # 单次请求的头像数量上限
 MAX_IMPORT_MEMBERS = 160  # ZIP 导入最大文件数量
-MAX_AUDIT_ITEMS = 500  # 审计日志最大保留条目数
+MAX_AUDIT_ITEMS = 500  # 审计日志单次最多读取条目数
+MAX_AUDIT_LINES = MAX_AUDIT_ITEMS * 4  # 审计日志超过这么多行时截断，只保留最近 MAX_AUDIT_ITEMS 条
+PAGE_RETENTION_SECONDS = 30 * 24 * 3600  # 30天 - 管理页备份与回收站条目的保留时间
 MAX_TASK_ITEMS = 100  # 后台任务最大保留条目数
 MAX_OPERATION_PREVIEWS = 8  # 操作预览最大保留数量
 OPERATION_PREVIEW_TTL = 15 * 60  # 15分钟 - 操作预览过期时间
@@ -58,6 +60,7 @@ UNKNOWN_LANGUAGE_COLOR = (100, 100, 100)  # 未知语言代码的标签底色
 # ============================================================
 
 DOWNLOAD_RETRIES = 3  # 语音下载重试次数
+DOWNLOAD_CONCURRENCY = 4  # 单个角色同时下载的语音条数
 CHARACTER_PAGE_RETRIES = 3  # 角色页请求重试次数
 RETRYABLE_PAGE_STATUSES = {429, 500, 502, 503, 504}  # 可重试的 HTTP 状态码
 

@@ -50,6 +50,8 @@ class VoiceRenderer:
             "help": threading.Lock(),
             "list": threading.Lock(),
         }
+        # 帮助图不含任何运行时数据，同一进程内只渲染一次。
+        self._help_path: Optional[str] = None
 
     def _font_candidates(self, *, bold: bool, mono: bool) -> Sequence[Path]:
         base = Path(__file__).parent
@@ -715,7 +717,10 @@ class VoiceRenderer:
 
     async def render_help(self) -> str:
         """Render the help panel outside the event loop."""
-        return await asyncio.to_thread(self._render_help_logic)
+        if self._help_path is None or not Path(self._help_path).is_file():
+            self._help_path = await asyncio.to_thread(self._render_help_logic)
+
+        return self._help_path
 
     def _render_help_logic(self) -> str:
         width = self.CANVAS_WIDTH

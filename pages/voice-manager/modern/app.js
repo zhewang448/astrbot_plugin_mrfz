@@ -1,4 +1,27 @@
 const bridge = window.AstrBotPluginPage;
+const {
+  LANGUAGES,
+  POLL_ACTIVE_MS,
+  POLL_IDLE_MS,
+  escapeHtml,
+  formatBytes,
+  formatNumber,
+  formatDate,
+  languageName,
+  errorMessage,
+  createRun,
+  quietly,
+  base64Blob,
+  audioKey,
+  cachedAudio,
+  cacheAudio,
+  exportRequest,
+  confirmPreview,
+  languageOptions,
+  fetchLanguageChecks,
+  applyFetchDefaults,
+  archiveOptions,
+} = window.VoiceCommon;
 let settings;
 
 // 语音按游戏内的使用场景分组，详情页按组排列；后端返回了不在表里的语音会归入“其他”。
@@ -49,19 +72,6 @@ const VOICE_GROUPS = [
 
 const VOICE_TYPES = VOICE_GROUPS.flatMap((group) => group.voices);
 
-const LANGUAGES = [
-  { code: "fy", name: "方言" },
-  { code: "cn", name: "中文" },
-  { code: "jp", name: "日语" },
-  { code: "us", name: "英语" },
-  { code: "kr", name: "韩语" },
-  { code: "it", name: "意语" },
-  { code: "ru", name: "俄语" },
-  { code: "de", name: "德语" },
-  { code: "es", name: "西班牙语" },
-  { code: "fr", name: "法语" },
-];
-
 const STATUS_LABELS = {
   own: "本档案",
   fallback: "基础回退",
@@ -98,8 +108,6 @@ const AUDIT_LABELS = {
 
 // 视图数据超过这个时间才在切换页签时后台刷新；切换本身总是先用缓存立即渲染。
 const STALE_MS = 15000;
-const POLL_ACTIVE_MS = 2000;
-const POLL_IDLE_MS = 8000;
 
 const state = {
   view: "archives",
@@ -115,11 +123,11 @@ const state = {
   operators: null,
   rosterSelected: new Set(),
   pendingReplace: null,
-  audioUrl: null,
   pollTimer: null,
   hasActiveTasks: false,
   taskSignature: "",
-  searchTimer: null,
+  catalogTimer: null,
+  rosterTimer: null,
   drawerReturnFocus: null,
   avatars: new Map(),
   avatarQueue: new Set(),
@@ -129,49 +137,11 @@ const state = {
   audioSequence: 0,
 };
 
-// 每个视图的数据缓存：{ at: 加载时间, signature: 上次渲染内容的签名, pending: 进行中的请求 }
+// 每个视图的数据缓存：{ at: 加载时间, signature: 上次渲染内容的签名, pending: 进行中的请求, generation: 请求代次 }
 const cache = {};
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function formatBytes(bytes) {
-  const value = Number(bytes || 0);
-  if (!Number.isFinite(value) || value <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
-  const amount = value / 1024 ** index;
-  return `${amount >= 100 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
-}
-
-function formatNumber(value) {
-  return new Intl.NumberFormat("zh-CN").format(Number(value || 0));
-}
-
-function formatDate(value, withTime = true) {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return new Intl.DateTimeFormat(bridge?.getLocale?.() || "zh-CN", {
-    ...(withTime ? {} : { year: "numeric" }),
-    month: "2-digit",
-    day: "2-digit",
-    ...(withTime ? { hour: "2-digit", minute: "2-digit" } : {}),
-  }).format(date);
-}
-
-function languageName(code) {
-  return LANGUAGES.find((item) => item.code === code)?.name || code || "自动";
-}
 
 function toast(message, type = "info") {
   const node = document.createElement("div");
@@ -182,51 +152,36 @@ function toast(message, type = "info") {
   window.setTimeout(() => node.remove(), type === "error" ? 6000 : 3600);
 }
 
-function errorMessage(error) {
-  return error instanceof Error ? error.message : String(error || "操作失败");
-}
-
-async function run(action, { success = null, silent = false } = {}) {
-  try {
-    const result = await action();
-    if (success) toast(success, "success");
-    return result;
-  } catch (error) {
-    if (!silent) toast(errorMessage(error), "error");
-    throw error;
-  }
-}
-
-// 事件回调里的失败已经通过 toast 提示过，这里只吞掉 rejection，避免控制台报未处理错误。
-function quietly(handler) {
-  return (...args) => {
-    Promise.resolve(handler(...args)).catch(() => {});
-  };
-}
+const run = createRun(toast);
 
 /**
  * 带缓存的加载：同一资源的并发请求合并为一个；内容没变时跳过重新渲染，
  * 避免切换页签或轮询时整块 DOM 重建。
  */
 async function cachedLoad(key, fetcher, render, { force = false, silent = false } = {}) {
-  const entry = (cache[key] ||= { at: 0, signature: "", pending: null, data: null });
+  const entry = (cache[key] ||= { at: 0, signature: "", pending: null, data: null, generation: 0 });
   if (!force && entry.data && Date.now() - entry.at < STALE_MS) return entry.data;
-  if (entry.pending) return entry.pending;
-  entry.pending = run(fetcher, { silent })
+  // 非强制刷新时合并进行中的请求；强制刷新（例如操作之后）必须拿到操作之后的新数据。
+  if (entry.pending && !force) return entry.pending;
+  const generation = ++entry.generation;
+  const pending = run(fetcher, { silent })
     .then((data) => {
-      entry.at = Date.now();
-      entry.data = data;
+      // 被更新的请求取代时不再渲染，免得旧响应覆盖新结果。
+      if (generation !== entry.generation) return data;
       const signature = JSON.stringify(data);
       if (signature !== entry.signature) {
-        entry.signature = signature;
         render(data);
+        entry.signature = signature;
       }
+      entry.at = Date.now();
+      entry.data = data;
       return data;
     })
     .finally(() => {
-      entry.pending = null;
+      if (entry.pending === pending) entry.pending = null;
     });
-  return entry.pending;
+  entry.pending = pending;
+  return pending;
 }
 
 function invalidate(...keys) {
@@ -334,15 +289,19 @@ function avatarHtml(name, className = "avatar") {
   const url = state.avatars.get(name);
   const initial = escapeHtml([...String(name || "?")][0] || "?");
   return `<span class="${className}" data-avatar="${escapeHtml(name)}" aria-hidden="true">${
-    url ? `<img src="${url}" alt="" />` : initial
+    url ? `<img src="${escapeHtml(url)}" alt="" />` : initial
   }</span>`;
 }
 
-function paintAvatars(name) {
-  const url = state.avatars.get(name);
-  if (!url) return;
-  $$(`[data-avatar="${CSS.escape(name)}"]`).forEach((node) => {
-    if (!node.querySelector("img")) node.innerHTML = `<img src="${url}" alt="" />`;
+// 一批头像返回后只查询一次文档，再按名字填充。
+function paintAvatars(names) {
+  const pending = new Set(names.filter((name) => state.avatars.get(name)));
+  if (!pending.size) return;
+  $$("[data-avatar]").forEach((node) => {
+    const name = node.dataset.avatar;
+    if (pending.has(name) && !node.querySelector("img")) {
+      node.innerHTML = `<img src="${escapeHtml(state.avatars.get(name))}" alt="" />`;
+    }
   });
 }
 
@@ -363,10 +322,9 @@ async function flushAvatars() {
   if (!names.length) return;
   try {
     const data = await bridge.apiGet("page/avatars", { names: names.join(",") });
-    Object.entries(data.avatars || {}).forEach(([name, url]) => {
-      state.avatars.set(name, url);
-      paintAvatars(name);
-    });
+    const avatars = Object.entries(data.avatars || {});
+    avatars.forEach(([name, url]) => state.avatars.set(name, url));
+    paintAvatars(avatars.map(([name]) => name));
   } catch {
     // 头像只是辅助信息，失败时保留首字占位，下次打开页面再试。
     names.forEach((name) => state.avatars.delete(name));
@@ -398,9 +356,7 @@ function observeAvatars(root) {
 /* ---------- 档案目录 ---------- */
 
 function renderLanguageFilter() {
-  $("#archive-language").innerHTML =
-    '<option value="all">全部语言</option>' +
-    LANGUAGES.map((item) => `<option value="${item.code}">${escapeHtml(item.name)}</option>`).join("");
+  $("#archive-language").innerHTML = '<option value="all">全部语言</option>' + languageOptions();
 }
 
 // 把基础档案和它的皮肤档案合成一组，同一个干员只出现一张卡片。
@@ -427,31 +383,40 @@ function groupArchives(items) {
   });
 }
 
-function filteredGroups() {
-  const query = $("#archive-search").value.trim().toLowerCase();
-  const language = $("#archive-language").value;
-  return state.groups.filter(
-    (group) =>
-      (!query || group.searchText.includes(query)) &&
-      (state.kind !== "skin" || group.skins.length > 0) &&
-      (language === "all" || group.languages.includes(language)),
+function matchesFilter(group, query, language) {
+  return (
+    (!query || group.searchText.includes(query)) &&
+    (state.kind !== "skin" || group.skins.length > 0) &&
+    (language === "all" || group.languages.includes(language))
   );
 }
 
-function renderCatalog() {
-  const groups = filteredGroups();
+// 筛选只切换已有条目的 hidden，不重建 DOM，头像等已加载内容保持不动。
+function filterCatalog() {
+  const query = $("#archive-search").value.trim().toLowerCase();
+  const language = $("#archive-language").value;
   const total = state.groups.length;
+  let shown = 0;
+  $$("#catalog > li").forEach((node) => {
+    const visible = matchesFilter(state.groups[Number(node.dataset.index)], query, language);
+    node.hidden = !visible;
+    if (visible) shown += 1;
+  });
   $("#archive-count").textContent =
-    groups.length === total ? `${formatNumber(total)} 名干员` : `${formatNumber(groups.length)} / ${formatNumber(total)} 名干员`;
-  $("#archive-empty").hidden = groups.length > 0;
+    shown === total ? `${formatNumber(total)} 名干员` : `${formatNumber(shown)} / ${formatNumber(total)} 名干员`;
+  $("#archive-empty").hidden = shown > 0;
   $("#archive-empty-text").textContent = total
     ? "没有匹配的档案。换个关键词或筛选条件试试。"
     : "还没有任何语音档案。去下载页挑几个干员吧。";
-  $("#catalog").innerHTML = groups
-    .map((group) => {
+}
+
+// 只在档案数据变化时调用（cachedLoad 会跳过内容相同的响应）。
+function renderCatalog() {
+  $("#catalog").innerHTML = state.groups
+    .map((group, index) => {
       const primary = group.operator || group.skins[0];
       return `
-        <li class="entry">
+        <li class="entry" data-index="${index}">
           <button class="entry-main" type="button" data-archive="${escapeHtml(primary.character)}">
             ${avatarHtml(group.base)}
             <span class="entry-text">
@@ -481,6 +446,7 @@ function renderCatalog() {
       `;
     })
     .join("");
+  filterCatalog();
   observeAvatars($("#catalog"));
 }
 
@@ -691,8 +657,6 @@ function stopAudio() {
   player.pause();
   player.removeAttribute("src");
   player.load();
-  if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
-  state.audioUrl = null;
 }
 
 async function openArchive(character) {
@@ -736,29 +700,25 @@ async function reloadDetail() {
   await fetchDetail(state.detail.character, state.detail.language);
 }
 
-function base64Blob(encoded, mime) {
-  const binary = window.atob(encoded);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return new Blob([bytes], { type: mime || "audio/wav" });
-}
-
 async function playVoice(voice) {
   const detail = state.detail;
   if (!detail) return;
   const audioSequence = ++state.audioSequence;
   const sequence = state.detailSequence;
-  const data = await run(() =>
-    bridge.apiGet("page/audio", { character: detail.character, language: detail.language, voice }),
-  );
-  // 请求返回前用户可能已经点了别的语音或关掉了详情。
-  if (sequence !== state.detailSequence || audioSequence !== state.audioSequence || state.detail !== detail || state.current !== voice) return;
+  const key = audioKey(detail, detail.voices?.find((item) => item.voice === voice) || { voice });
+  let url = cachedAudio(key);
+  if (!url) {
+    const data = await run(() =>
+      bridge.apiGet("page/audio", { character: detail.character, language: detail.language, voice }),
+    );
+    const blob = await base64Blob(data.base64, data.mime);
+    // 请求返回前用户可能已经点了别的语音或关掉了详情。
+    if (sequence !== state.detailSequence || audioSequence !== state.audioSequence || state.detail !== detail || state.current !== voice) return;
+    url = cacheAudio(key, blob);
+  }
   stopAudio();
-  state.audioUrl = URL.createObjectURL(base64Blob(data.base64, data.mime));
   const player = $("#audio-player");
-  player.src = state.audioUrl;
+  player.src = url;
   await player.play().catch(() => {});
 }
 
@@ -799,30 +759,13 @@ function setSelecting(next) {
 }
 
 async function downloadVoice(voice) {
-  const detail = state.detail;
-  await run(
-    () =>
-      bridge.download(
-        "page/export",
-        { character: detail.character, language: detail.language, voice },
-        `${detail.base}-${detail.language}-${voice}.wav`,
-      ),
-    { success: "已开始下载" },
-  );
+  await run(() => exportRequest(bridge, state.detail, voice), { success: "已开始下载" });
 }
 
 async function exportArchive() {
   const detail = state.detail;
   if (!detail?.language) return;
-  await run(
-    () =>
-      bridge.download(
-        "page/export",
-        { character: detail.character, language: detail.language },
-        `${detail.base}-${detail.language}.zip`,
-      ),
-    { success: "已开始下载 ZIP" },
-  );
+  await run(() => exportRequest(bridge, detail), { success: "已开始下载 ZIP" });
 }
 
 async function removeVoice(voice) {
@@ -854,7 +797,7 @@ async function batchRemove() {
       voices,
     }),
   );
-  const confirmed = await modalConfirm({
+  const confirmed = await confirmPreview(bridge, preview, modalConfirm, {
     title: preview.title || "批量回收",
     message: "按当前文件状态生成的预览。如果文件在确认前发生变化，操作会被拦下。",
     danger: true,
@@ -870,10 +813,7 @@ async function batchRemove() {
       previewSample(preview.sample),
     ].join(""),
   });
-  if (!confirmed) {
-    await discardPreview(preview.previewToken);
-    return;
-  }
+  if (!confirmed) return;
   const result = await run(() => bridge.apiPost("page/remove/batch", { previewToken: preview.previewToken }), {
     success: `已回收 ${preview.affected} 条语音`,
   });
@@ -888,7 +828,7 @@ async function importZip(file) {
   if (!file || !detail?.importToken) return;
   const preview = await run(() => bridge.upload(`page/import/preview/${detail.importToken}`, file));
   const actionLabel = { add: "新增", overwrite: "覆盖", skip: "跳过" };
-  const confirmed = await modalConfirm({
+  const confirmed = await confirmPreview(bridge, preview, modalConfirm, {
     title: preview.title || `导入到 ${detail.base}（${languageName(detail.language)}）`,
     message: "ZIP 已通过安全校验，确认后才会写入。",
     confirmLabel: `导入 ${preview.added + preview.overwritten} 个文件`,
@@ -908,10 +848,7 @@ async function importZip(file) {
       ),
     ].join(""),
   });
-  if (!confirmed) {
-    await discardPreview(preview.previewToken);
-    return;
-  }
+  if (!confirmed) return;
   await run(() => bridge.apiPost("page/import/commit", { previewToken: preview.previewToken }), {
     success: "ZIP 已导入",
   });
@@ -962,11 +899,6 @@ function previewSample(items = []) {
   `;
 }
 
-async function discardPreview(previewToken) {
-  if (!previewToken) return;
-  await bridge.apiPost("page/preview/discard", { previewToken }).catch(() => {});
-}
-
 function modalConfirm({ title, message = "", danger = false, fields = "", confirmLabel = "确认" }) {
   const modal = $("#modal");
   $("#modal-title").textContent = title;
@@ -988,16 +920,7 @@ function modalConfirm({ title, message = "", danger = false, fields = "", confir
 /* ---------- 下载任务 ---------- */
 
 function renderFetchLanguages() {
-  $("#fetch-languages").innerHTML = LANGUAGES.map(
-    (item) => `
-      <label class="check">
-        <input type="checkbox" name="fetch-language" value="${item.code}" ${
-          ["fy", "cn", "jp"].includes(item.code) ? "checked" : ""
-        } />
-        <span>${escapeHtml(item.name)}</span>
-      </label>
-    `,
-  ).join("");
+  $("#fetch-languages").innerHTML = fetchLanguageChecks("check");
 }
 
 function fetchOptions() {
@@ -1012,13 +935,15 @@ function taskProgress(item) {
   const progress = item.progress;
   if (item.status !== "running") return "";
   if (progress?.total) {
-    const percent = Math.min(100, (progress.done / progress.total) * 100);
+    const done = Number(progress.done) || 0;
+    const total = Number(progress.total) || 0;
+    const percent = Math.min(100, (done / total) * 100);
     return `
-      <span class="progress is-determinate" role="progressbar" aria-valuemin="0" aria-valuemax="${progress.total}"
-        aria-valuenow="${progress.done}" aria-label="下载进度">
+      <span class="progress is-determinate" role="progressbar" aria-valuemin="0" aria-valuemax="${total}"
+        aria-valuenow="${done}" aria-label="下载进度">
         <i style="width:${percent.toFixed(1)}%"></i>
       </span>
-      <span class="progress-text">${formatNumber(progress.done)} / ${formatNumber(progress.total)}</span>
+      <span class="progress-text">${formatNumber(done)} / ${formatNumber(total)}</span>
     `;
   }
   return '<span class="progress" aria-hidden="true"><i></i></span>';
@@ -1076,7 +1001,7 @@ async function submitFetch(event) {
     return;
   }
   const preview = await run(() => bridge.apiPost("page/fetch/preview", { character, languages, includeSkin }));
-  const confirmed = await modalConfirm({
+  const confirmed = await confirmPreview(bridge, preview, modalConfirm, {
     title: preview.title || `下载 ${character} 的语音`,
     message: `语言：${(preview.languageNames || []).join("、")}。`,
     confirmLabel: "开始下载",
@@ -1090,10 +1015,7 @@ async function submitFetch(event) {
       previewWarnings(preview.warnings),
     ].join(""),
   });
-  if (!confirmed) {
-    await discardPreview(preview.previewToken);
-    return;
-  }
+  if (!confirmed) return;
   await run(() => bridge.apiPost("page/fetch", { previewToken: preview.previewToken }), {
     success: "下载任务已开始",
   });
@@ -1367,14 +1289,7 @@ async function bindingModal(existing = null) {
       </label>
       <label class="stack"><span>档案</span>
         <select class="field" id="modal-character">
-          ${archives
-            .map(
-              (item) =>
-                `<option value="${escapeHtml(item.character)}" ${item.character === existing?.character ? "selected" : ""}>${escapeHtml(
-                  item.kind === "skin" ? `${item.base} / ${item.skinName}` : item.base,
-                )}</option>`,
-            )
-            .join("")}
+          ${archiveOptions(archives, existing)}
         </select>
       </label>
       <div class="field-pair">
@@ -1397,10 +1312,7 @@ async function bindingModal(existing = null) {
         <label class="stack"><span>语言</span>
           <select class="field" id="modal-language">
             <option value="auto">自动</option>
-            ${LANGUAGES.map(
-              (item) =>
-                `<option value="${item.code}" ${item.code === existing?.language ? "selected" : ""}>${escapeHtml(item.name)}</option>`,
-            ).join("")}
+            ${languageOptions(existing?.language)}
           </select>
         </label>
       </div>
@@ -1604,8 +1516,8 @@ function bindEvents() {
 
   // 档案筛选全部在本地完成，不再请求后端。
   $("#archive-search").addEventListener("input", () => {
-    window.clearTimeout(state.searchTimer);
-    state.searchTimer = window.setTimeout(renderCatalog, 120);
+    window.clearTimeout(state.catalogTimer);
+    state.catalogTimer = window.setTimeout(filterCatalog, 120);
   });
   $("#archive-kind").addEventListener("click", (event) => {
     const button = event.target.closest("[data-kind]");
@@ -1614,9 +1526,9 @@ function bindEvents() {
     $$("[data-kind]", $("#archive-kind")).forEach((node) => {
       node.setAttribute("aria-pressed", String(node === button));
     });
-    renderCatalog();
+    filterCatalog();
   });
-  $("#archive-language").addEventListener("change", renderCatalog);
+  $("#archive-language").addEventListener("change", filterCatalog);
   $("#catalog").addEventListener(
     "click",
     quietly((event) => {
@@ -1709,8 +1621,8 @@ function bindEvents() {
     }),
   );
   $("#roster-search").addEventListener("input", () => {
-    window.clearTimeout(state.searchTimer);
-    state.searchTimer = window.setTimeout(renderRoster, 120);
+    window.clearTimeout(state.rosterTimer);
+    state.rosterTimer = window.setTimeout(renderRoster, 120);
   });
   $("#roster").addEventListener("change", (event) => {
     const input = event.target.closest("[data-roster]");
@@ -1791,7 +1703,6 @@ function bindEvents() {
 
 /* ---------- 轮询 ---------- */
 
-// 有任务在跑时 2 秒一次，空闲时 8 秒一次；页面不可见时暂停。
 function schedulePoll(delay) {
   window.clearTimeout(state.pollTimer);
   state.pollTimer = window.setTimeout(pollBackgroundState, delay);
@@ -1826,22 +1737,14 @@ async function initialize() {
   document.title = bridge.t?.("pages.voice-manager.title", "语音档案控制台") || "语音档案控制台";
   renderLanguageFilter();
   renderFetchLanguages();
-  settings = window.VoiceSettings({bridge, root: $("#view-settings"), onChange(config) {
-    $$('input[name="fetch-language"]').forEach(input => { input.checked = config.auto_download_language.includes(languageName(input.value)); });
-    $("#fetch-skin").checked = config.auto_download_skin;
-  }});
-  await settings.load();
+  settings = window.VoiceSettings({ bridge, root: $("#view-settings"), onChange: applyFetchDefaults });
   bindEvents();
-  await Promise.allSettled([loadOverview(), loadArchives()]);
+  // 配置和档案互不依赖，一起加载，首屏不必多等一次往返。
+  await Promise.allSettled([settings.load(), loadOverview(), loadArchives()]);
   // 干员列表在后台预取，切到下载页时就不用等。
   loadOperators({ silent: true }).catch(() => {});
   await pollBackgroundState();
 }
-
-window.addEventListener("beforeunload", () => {
-  window.clearTimeout(state.pollTimer);
-  if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
-});
 
 initialize().catch((error) => {
   setConnection("error", "初始化失败");
