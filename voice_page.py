@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import zipfile
+import aiohttp
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,7 @@ from astrbot.api.web import (
 from PIL import Image as PILImage
 
 from . import constants
+from .prts import PRTSLookupError, PRTSNotFoundError, resolve_title
 
 
 PLUGIN_NAME = constants.PLUGIN_NAME
@@ -96,7 +98,7 @@ class VoicePageManager:
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
-        self._mutation_lock = asyncio.Lock()
+        self._mutation_lock = self.voice_mgr.mutation_lock
         self._audit_lock = asyncio.Lock()
         self._fetch_semaphore = asyncio.Semaphore(2)
         self._preview_cleanup_lock = threading.Lock()
@@ -307,6 +309,13 @@ class VoicePageManager:
                 record = self._operation_previews.pop(preview_id, None)
                 self._remove_preview_staging(record)
 
+            excess = len(self._operation_previews) - self.MAX_OPERATION_PREVIEWS
+            if excess > 0:
+                oldest = sorted(self._operation_previews,
+                                key=lambda key: self._operation_previews[key]["createdEpoch"])
+                for preview_id in oldest[:excess]:
+                    self._remove_preview_staging(self._operation_previews.pop(preview_id))
+
         if remove_orphans:
             active_staging = {
                 Path(record["stagingDir"]).resolve()
@@ -321,26 +330,10 @@ class VoicePageManager:
 
             for path in paths:
                 try:
-                    if path.resolve() not in active_staging:
+                    if path.resolve() not in active_staging and not (path / "recovery.json").exists():
                         shutil.rmtree(path)
                 except OSError:
                     continue
-
-            if len(self._operation_previews) <= self.MAX_OPERATION_PREVIEWS:
-                return
-
-            oldest = sorted(
-                self._operation_previews,
-                key=lambda current: float(
-                    self._operation_previews[current].get("createdEpoch", 0)
-                ),
-            )
-
-            for preview_id in oldest[
-                : len(self._operation_previews) - self.MAX_OPERATION_PREVIEWS
-            ]:
-                record = self._operation_previews.pop(preview_id, None)
-                self._remove_preview_staging(record)
 
     def _cleanup_orphan_uploads(self) -> None:
         """清理超过 1 小时的孤儿临时文件，防止进程崩溃导致的泄漏。"""
@@ -359,7 +352,8 @@ class VoicePageManager:
         path = Path(record["stagingDir"])
 
         try:
-            if self._path_within(path, self.preview_dir) and path != self.preview_dir:
+            if (self._path_within(path, self.preview_dir) and path != self.preview_dir
+                    and not (path / "recovery.json").exists()):
                 shutil.rmtree(path, ignore_errors=True)
         except OSError:
             pass
@@ -969,13 +963,8 @@ class VoicePageManager:
         )
         summary = self._archive_summary(character)
 
-        if language is None:
-            voices = []
-        else:
-            voices = [
-                self._voice_status(character, language, voice)
-                for voice in self.voice_mgr.VOICE_DESCRIPTIONS
-            ]
+        voices = [self._voice_status(character, language, voice)
+                  for voice in self.voice_mgr.VOICE_DESCRIPTIONS]
 
         for item in voices:
             item["replaceToken"] = self._encode_token(
@@ -1170,7 +1159,7 @@ class VoicePageManager:
             return destination
         except OSError as exc:
             logger.warning(f"备份文件失败 {target}: {exc}")
-            return None
+            raise
 
     async def _save_upload(
         self,
@@ -1191,15 +1180,47 @@ class VoicePageManager:
         path = Path(temp_name)
 
         try:
-            await upload.save(path)
-
-            if path.stat().st_size > max_bytes:
-                raise ValueError("上传文件超过大小限制")
-
+            written = 0
+            with path.open("wb") as output:
+                while chunk := await upload.read(64 * 1024):
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise ValueError("上传文件超过大小限制")
+                    output.write(chunk)
             return path
-        except Exception:
+        except BaseException:
             path.unlink(missing_ok=True)
             raise
+
+    async def _run_file_operation(self, operation, *args):
+        worker = asyncio.create_task(asyncio.to_thread(operation, *args))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            # 线程不能被取消；等提交/回滚结束后才释放锁和暂存文件。
+            async def finish():
+                try:
+                    await worker
+                except Exception as exc:
+                    logger.warning(f"取消期间文件操作失败: {exc}")
+                finally:
+                    await asyncio.to_thread(self.voice_mgr.scan_voice_files)
+
+            cleanup = asyncio.create_task(finish())
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            cleanup.result()
+            raise
+
+    def _replace_voice_file(self, source, target, reason):
+        with self.voice_mgr.file_lock:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            backup = self._backup_existing(target, reason)
+            os.replace(source, target)
+            return backup
 
     async def replace_voice(self, token: str):
         temp_path = None
@@ -1229,9 +1250,7 @@ class VoicePageManager:
                 raise ValueError("WAV 文件头无效或文件为空")
 
             async with self._mutation_lock:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                backup = self._backup_existing(target, "replace")
-                os.replace(temp_path, target)
+                backup = await self._run_file_operation(self._replace_voice_file, temp_path, target, "replace")
                 temp_path = None
 
             await self.scan_callback(True)
@@ -1352,7 +1371,7 @@ class VoicePageManager:
             preview_id = uuid4().hex
             staging_dir = self.preview_dir / preview_id
             staging_dir.mkdir(parents=True)
-            staged = await asyncio.to_thread(
+            staged = await self._run_file_operation(
                 self._stage_import,
                 zip_path,
                 staging_dir,
@@ -1443,6 +1462,73 @@ class VoicePageManager:
             if staging_dir is not None:
                 shutil.rmtree(staging_dir, ignore_errors=True)
 
+    def _commit_import_files(self, character, language, staged, entries=None):
+        """一次提交：锁内重验、全部备份，再写入；失败保留回滚材料。"""
+        with self.voice_mgr.file_lock:
+            entries = entries or [{"voice": voice, "action": "overwrite"}
+                                  for voice in staged]
+            plan = []
+            for entry in entries:
+                voice = entry["voice"]
+                target = self._own_voice_path(character, language, voice)
+                source = staged[voice]
+                if "targetSignature" in entry:
+                    expected = entry["targetSignature"]
+                    expected = tuple(expected) if expected is not None else None
+                    if self._path_signature(target) != expected:
+                        raise ValueError("档案状态在预览后发生变化，请重新预览")
+                if not self.voice_mgr._is_valid_wav_file(source):
+                    raise ValueError("预览文件已失效，请重新预览")
+                skip = entry["action"] == "skip"
+                if skip and not self._files_equal(source, target):
+                    raise ValueError("档案状态在预览后发生变化，请重新预览")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                plan.append({"source": source, "target": target, "skip": skip,
+                             "backup": None})
+            # 所有备份完成前，不改变任何原文件。
+            for item in plan:
+                if not item["skip"]:
+                    item["backup"] = self._backup_existing(item["target"], "import")
+            completed = []
+            staging = next(iter(staged.values())).parent if staged else None
+            recovery = staging / "recovery.json" if staging else None
+            if recovery is not None:
+                self.voice_mgr._atomic_write_json(recovery, {"files": [
+                    {key: str(value) for key, value in item.items()} for item in plan
+                ]})
+            try:
+                for item in plan:
+                    if not item["skip"]:
+                        os.replace(item["source"], item["target"])
+                        completed.append(item)
+            except OSError as exc:
+                failures = []
+                for item in reversed(completed):
+                    try:
+                        os.replace(item["target"], item["source"])
+                        if item["backup"] is not None:
+                            fd, temporary = tempfile.mkstemp(dir=item["target"].parent, suffix=".restore")
+                            os.close(fd)
+                            try:
+                                shutil.copy2(item["backup"], temporary)
+                                os.replace(temporary, item["target"])
+                            finally:
+                                Path(temporary).unlink(missing_ok=True)
+                    except OSError:
+                        failures.append(item)
+                if failures:
+                    raise OSError(f"导入失败且部分回滚失败，恢复文件已保留在 {staging}") from exc
+                if recovery is not None:
+                    recovery.unlink(missing_ok=True)
+                raise
+            if recovery is not None:
+                recovery.unlink(missing_ok=True)
+            return {
+                "imported": len(completed),
+                "backups": sum(item["backup"] is not None for item in plan),
+                "skipped": sum(item["skip"] for item in plan),
+            }
+
     async def commit_import(self):
         payload = await request.json(default={})
 
@@ -1469,21 +1555,15 @@ class VoicePageManager:
             ):
                 raise ValueError("操作预览内容无效，请重新预览")
 
-            plan = []
+            staged = {}
 
             for entry in entries:
+                if not isinstance(entry, dict):
+                    raise ValueError("操作预览内容无效，请重新预览")
                 voice = str(entry.get("voice", ""))
                 action = str(entry.get("action", ""))
                 staged_path = staging_dir / f"{voice}.wav"
-                target = self._own_voice_path(character, language, voice)
-                expected_signature = entry.get("targetSignature")
-                current_signature = self._path_signature(target)
-
-                if expected_signature is not None:
-                    expected_signature = tuple(expected_signature)
-
-                if current_signature != expected_signature:
-                    raise ValueError("档案状态在预览后发生变化，请重新预览")
+                self._own_voice_path(character, language, voice)
 
                 if not staged_path.is_file() or action not in {
                     "add",
@@ -1492,33 +1572,14 @@ class VoicePageManager:
                 }:
                     raise ValueError("预览文件已失效，请重新预览")
 
-                if action == "skip" and not await asyncio.to_thread(
-                    self._files_equal,
-                    staged_path,
-                    target,
-                ):
-                    raise ValueError("档案状态在预览后发生变化，请重新预览")
-
-                plan.append((voice, action, staged_path, target))
-
-            backups = 0
-            imported = 0
-            skipped = 0
+                staged[voice] = staged_path
 
             async with self._mutation_lock:
-                for _, action, staged_path, target in plan:
-                    if action == "skip":
-                        skipped += 1
-                        continue
-
-                    target.parent.mkdir(parents=True, exist_ok=True)
-
-                    if action == "overwrite":
-                        if self._backup_existing(target, "import") is not None:
-                            backups += 1
-
-                    os.replace(staged_path, target)
-                    imported += 1
+                result = await self._run_file_operation(
+                    self._commit_import_files, character, language,
+                    staged, entries,
+                )
+            imported, backups, skipped = result["imported"], result["backups"], result["skipped"]
 
             if imported:
                 await self.scan_callback(True)
@@ -1543,12 +1604,18 @@ class VoicePageManager:
                 }
             )
         except (OSError, ValueError, zipfile.BadZipFile) as exc:
+            if record is not None:
+                await self.scan_callback(True)
+                await self._audit("import_failed", str(record.get("payload", {}).get("character", "")),
+                                  details={"error": str(exc)})
             return error_response(str(exc), status_code=400)
         finally:
-            self._remove_preview_staging(record)
+            if record is None or not (Path(record["stagingDir"]) / "recovery.json").exists():
+                self._remove_preview_staging(record)
 
     async def import_archive(self, token: str):
         zip_path = None
+        staging_dir = None
 
         try:
             payload = self._decode_token(token)
@@ -1573,30 +1640,11 @@ class VoicePageManager:
                 max_bytes=self.MAX_IMPORT_BYTES,
             )
 
-            with tempfile.TemporaryDirectory(
-                prefix="stage-",
-                dir=str(self.upload_dir),
-            ) as stage_name:
-                staged = await asyncio.to_thread(
-                    self._stage_import,
-                    zip_path,
-                    Path(stage_name),
-                )
-                backups = 0
-
-                async with self._mutation_lock:
-                    for voice, staged_path in staged.items():
-                        target = self._own_voice_path(
-                            character,
-                            language,
-                            voice,
-                        )
-                        target.parent.mkdir(parents=True, exist_ok=True)
-
-                        if self._backup_existing(target, "import") is not None:
-                            backups += 1
-
-                        os.replace(staged_path, target)
+            staging_dir = Path(tempfile.mkdtemp(prefix="stage-", dir=str(self.upload_dir)))
+            staged = await self._run_file_operation(self._stage_import, zip_path, staging_dir)
+            async with self._mutation_lock:
+                result = await self._run_file_operation(self._commit_import_files, character, language, staged)
+            backups = result["backups"]
 
             await self.scan_callback(True)
             await self._audit(
@@ -1616,10 +1664,39 @@ class VoicePageManager:
                 }
             )
         except (OSError, ValueError, zipfile.BadZipFile) as exc:
+            if staging_dir is not None:
+                await self.scan_callback(True)
+                await self._audit("import_failed", character, details={"error": str(exc)})
             return error_response(str(exc), status_code=400)
         finally:
             if zip_path is not None:
                 zip_path.unlink(missing_ok=True)
+            if staging_dir is not None and not (staging_dir / "recovery.json").exists():
+                shutil.rmtree(staging_dir, ignore_errors=True)
+
+    def _commit_batch_remove(self, plan):
+        with self.voice_mgr.file_lock:
+            for item in plan:
+                if self._path_signature(item["target"]) != item["signature"]:
+                    raise ValueError("档案状态在预览后发生变化，请重新预览")
+            moved = []
+            try:
+                for item in plan:
+                    item["trashItem"].mkdir(parents=True, exist_ok=True)
+                    self.voice_mgr._atomic_write_json(item["trashItem"] / "metadata.json", item["metadata"])
+                    item["target"].replace(item["destination"])
+                    moved.append(item)
+            except OSError:
+                for item in reversed(moved):
+                    try:
+                        item["target"].parent.mkdir(parents=True, exist_ok=True)
+                        item["destination"].replace(item["target"])
+                    except OSError:
+                        logger.exception(f"批量回收回滚失败: {item['target']}")
+                for item in plan:
+                    if not item["destination"].exists():
+                        shutil.rmtree(item["trashItem"], ignore_errors=True)
+                raise
 
     async def remove_voice(self):
         payload = await request.json(default={})
@@ -1666,11 +1743,10 @@ class VoicePageManager:
             }
 
             async with self._mutation_lock:
-                self.voice_mgr._atomic_write_json(
-                    trash_item / "metadata.json",
-                    metadata,
-                )
-                target.replace(destination)
+                await self._run_file_operation(self._commit_batch_remove, [{
+                    "target": target, "trashItem": trash_item, "destination": destination,
+                    "metadata": metadata, "signature": self._path_signature(target),
+                }])
 
             await self.scan_callback(True)
             await self._audit(
@@ -1824,37 +1900,12 @@ class VoicePageManager:
                         "trashItem": trash_item,
                         "destination": destination,
                         "metadata": metadata,
+                        "signature": current_signature,
                     }
                 )
 
-            moved = []
-
             async with self._mutation_lock:
-                try:
-                    for item in plan:
-                        item["trashItem"].mkdir(parents=True)
-                        self.voice_mgr._atomic_write_json(
-                            item["trashItem"] / "metadata.json",
-                            item["metadata"],
-                        )
-                        item["target"].replace(item["destination"])
-                        moved.append(item)
-                except Exception:
-                    for item in reversed(moved):
-                        try:
-                            item["target"].parent.mkdir(parents=True, exist_ok=True)
-                            item["destination"].replace(item["target"])
-                        except OSError:
-                            logger.exception(
-                                "批量回收回滚失败: "
-                                f"{item['metadata'].get('relativePath', '')}"
-                            )
-
-                    for item in plan:
-                        if item not in moved or item["target"].is_file():
-                            shutil.rmtree(item["trashItem"], ignore_errors=True)
-
-                    raise
+                await self._run_file_operation(self._commit_batch_remove, plan)
 
             await self.scan_callback(True)
             total_bytes = sum(item["metadata"]["bytes"] for item in plan)
@@ -1949,9 +2000,7 @@ class VoicePageManager:
             source = item_dir / "file.wav"
 
             async with self._mutation_lock:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                backup = self._backup_existing(target, "restore")
-                source.replace(target)
+                backup = await self._run_file_operation(self._replace_voice_file, source, target, "restore")
                 shutil.rmtree(item_dir)
 
             await self.scan_callback(True)
@@ -2106,45 +2155,46 @@ class VoicePageManager:
             operation = self._normalize_fetch_payload(payload)
             character = operation["character"]
             language_codes = operation["languageCodes"]
-            references = [character]
-
-            if operation["includeSkin"]:
-                for resource_id in self.voice_mgr.skin_voice_index.get(
-                    character,
-                    {},
-                ):
-                    reference = self.voice_mgr._skin_reference(
-                        character,
-                        resource_id,
-                    )
-
-                    if reference:
-                        references.append(reference)
+            try:
+                record = await self.voice_mgr._get_voice_record(character)
+            except PRTSNotFoundError:
+                async with aiohttp.ClientSession(headers=self.voice_mgr.DEFAULT_HEADERS,
+                                                timeout=aiohttp.ClientTimeout(total=30, connect=10)) as session:
+                    canonical = await resolve_title(session, character)
+                    if not canonical or not self.voice_mgr.validate_character(canonical):
+                        raise
+                    record = await self.voice_mgr._get_voice_record(canonical, session=session)
+                character = canonical
+            character = record.get("character", self.voice_mgr.resolve_operator_alias(character))
+            if not self.voice_mgr.validate_character(character):
+                raise ValueError("PRTS 返回的角色名称不合法")
+            operation["character"] = character
+            plan = self.voice_mgr.build_download_plan(
+                character, record, operation["includeSkin"], operation["languages"],
+            )
 
             existing = 0
             overwritten = 0
             missing = 0
             damaged = 0
 
-            for reference in references:
-                for language in language_codes:
-                    force_redownload = self.voice_mgr.needs_voice_resource_remap(
-                        character,
-                        language,
-                    )
-
-                    for voice in self.voice_mgr.VOICE_DESCRIPTIONS:
-                        status = self._voice_status(reference, language, voice)
-
-                        if status["status"] == "own":
-                            if force_redownload:
-                                overwritten += 1
-                            else:
-                                existing += 1
-                        elif status["status"] == "damaged":
-                            damaged += 1
-                        else:
-                            missing += 1
+            for item in plan:
+                parts = [character]
+                if item["skin_directory"]:
+                    parts.extend(("skin", item["skin_directory"]))
+                parts.extend((item["language"], f"{item['voice']}.wav"))
+                path = self.voice_mgr._safe_path(self.voices_dir, *parts)
+                if path is None:
+                    raise ValueError("语音目标路径无效")
+                if self.voice_mgr._is_valid_wav_file(path):
+                    if item["force_redownload"]:
+                        overwritten += 1
+                    else:
+                        existing += 1
+                elif path.is_file():
+                    damaged += 1
+                else:
+                    missing += 1
 
             language_names = [
                 self.voice_mgr.LANGUAGE_MAP[language]["name"]
@@ -2157,12 +2207,8 @@ class VoicePageManager:
                 "languageCodes": language_codes,
                 "languageNames": language_names,
                 "includeSkin": operation["includeSkin"],
-                "knownArchives": len(references),
-                "knownSlots": (
-                    len(references)
-                    * len(language_codes)
-                    * len(self.voice_mgr.VOICE_DESCRIPTIONS)
-                ),
+                "knownArchives": len({item["skin_directory"] for item in plan}),
+                "knownSlots": len(plan),
                 "existing": existing,
                 "overwritten": overwritten,
                 "missing": missing,
@@ -2172,14 +2218,6 @@ class VoicePageManager:
                         "有效本地文件会跳过；损坏、缺失或"
                         "待编号修复的条目会重新请求。"
                     ),
-                    *(
-                        [
-                            "PRTS 中尚未登记到本地的新皮肤包会在"
-                            "任务执行时加入，未计入上述数量。"
-                        ]
-                        if operation["includeSkin"]
-                        else []
-                    ),
                 ],
             }
             result = self._issue_operation_preview(
@@ -2188,7 +2226,7 @@ class VoicePageManager:
                 summary=summary,
             )
             return json_response(result)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, PRTSLookupError) as exc:
             return error_response(str(exc), status_code=400)
 
     async def start_fetch(self):
@@ -2229,7 +2267,7 @@ class VoicePageManager:
                     progress=report,
                 )
 
-            await self.scan_callback(True)
+            await self.scan_callback(False)
 
             if not success:
                 raise RuntimeError(message)
@@ -2282,6 +2320,10 @@ class VoicePageManager:
         )
 
     def _run_integrity(self, quarantine: bool) -> dict:
+        with self.voice_mgr.file_lock:
+            return self._run_integrity_locked(quarantine)
+
+    def _run_integrity_locked(self, quarantine: bool) -> dict:
         checked = 0
         valid = 0
         issues = []
@@ -2372,10 +2414,8 @@ class VoicePageManager:
 
         async def runner(record: dict) -> dict:
             record["message"] = "正在检查本地 WAV"
-            report = await asyncio.to_thread(
-                self._run_integrity,
-                quarantine,
-            )
+            async with self._mutation_lock:
+                report = await self._run_file_operation(self._run_integrity, quarantine)
             self._latest_integrity = report
 
             if report["isolated"]:

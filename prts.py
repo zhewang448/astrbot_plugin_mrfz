@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import hashlib
 import re
 from typing import Any, Dict, List, Optional
 
@@ -151,34 +152,80 @@ async def fetch_voice_record(
     character: str,
 ) -> Dict[str, Any]:
     """读取“干员/语音记录”页的模板参数并解析，见 parse_voice_record。"""
-    title = f"{character}{VOICE_PAGE_SUFFIX}"
-    data = await api_query(
-        session,
-        {
-            "action": "query",
-            "prop": "revisions",
-            "rvprop": "content",
-            "rvslots": "main",
-            "titles": title,
-            "redirects": "1",
-        },
-    )
-    pages = data.get("query", {}).get("pages", [])
-
-    if not pages or pages[0].get("missing") or pages[0].get("invalid"):
+    records = await fetch_voice_records(session, [character])
+    if character not in records:
         raise PRTSNotFoundError(f"PRTS 未找到角色 {character} 的语音记录")
+    return records[character]
 
-    try:
-        content = pages[0]["revisions"][0]["slots"]["main"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise PRTSLookupError("PRTS 语音记录页内容为空") from exc
 
-    record = parse_voice_record(str(content))
+async def fetch_voice_records(
+    session: aiohttp.ClientSession,
+    characters: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    """批量读取资源记录和头像地址；不存在的页面省略，解析失败抛错。"""
+    result: Dict[str, Dict[str, Any]] = {}
+    names = list(dict.fromkeys(characters))
+    batch_size = constants.PRTS_BATCH_TITLES
 
-    if not record["paths"]:
-        raise PRTSLookupError("PRTS 语音记录页缺少资源路径，页面结构可能已变化")
+    for start in range(0, len(names), batch_size):
+        batch = names[start : start + batch_size]
+        data = await api_query(
+            session,
+            {
+                "action": "query",
+                "prop": "revisions|imageinfo",
+                "rvprop": "content",
+                "rvslots": "main",
+                "iiprop": "url",
+                "redirects": "1",
+                "titles": "|".join(
+                    title for name in batch for title in (
+                        f"{name}{VOICE_PAGE_SUFFIX}",
+                        constants.PRTS_AVATAR_FILE_TITLE.format(character=name),
+                    )
+                ),
+            },
+        )
+        query = data.get("query", {})
+        # MediaWiki 会规范化页名（如首字母大写），按原名对回去。
+        normalized = {
+            str(item.get("from", "")): str(item.get("to", ""))
+            for item in query.get("normalized", [])
+        }
+        redirects = {str(item["from"]): str(item["to"])
+                     for item in query.get("redirects", [])}
+        pages = {str(page.get("title", "")): page
+                 for page in query.get("pages", [])}
 
-    return record
+        def find_page(title):
+            current = normalized.get(title, title)
+            seen = set()
+            while current in redirects and current not in seen:
+                seen.add(current)
+                current = redirects[current]
+            return pages.get(current)
+
+        for name in batch:
+            page = find_page(f"{name}{VOICE_PAGE_SUFFIX}")
+            if page is None or page.get("missing") or page.get("invalid"):
+                continue
+
+            try:
+                content = page["revisions"][0]["slots"]["main"]["content"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise PRTSLookupError(f"{name} 的语音记录页内容为空") from exc
+
+            record = parse_voice_record(str(content))
+            record["character"] = str(page["title"])[: -len(VOICE_PAGE_SUFFIX)]
+
+            if not record["paths"] or not record["files"]:
+                raise PRTSLookupError(f"{name} 的语音记录缺少路径或文件名")
+            avatar = find_page(constants.PRTS_AVATAR_FILE_TITLE.format(character=name)) or {}
+            info = avatar.get("imageinfo") or [{}]
+            record["avatar_url"] = str(info[0].get("url", "")) or None
+            result[name] = record
+
+    return result
 
 
 async def fetch_file_url(session: aiohttp.ClientSession, file_title: str) -> Optional[str]:
@@ -203,6 +250,46 @@ async def fetch_file_url(session: aiohttp.ClientSession, file_title: str) -> Opt
         return None
 
     return str(info[0].get("url", "")) or None
+
+
+def language_from_label(label: str, voice_key: str = "") -> Optional[str]:
+    base, _ = _split_skin_label(label)
+    language = constants.PRTS_LANGUAGE_LABELS.get(base)
+    if language is None and base == "联动":
+        language = constants.PRTS_VOICE_FOLDERS.get(voice_key.strip("/").split("/", 1)[0])
+    return language
+
+
+def skin_name_from_label(label: str, voice_key: str) -> str:
+    match = re.search(r"[（(]([^()（）]+)[）)]", label)
+    name = match.group(1).strip() if match else ""
+    return _safe_resource_name(name, voice_key, "skin_", 10)
+
+
+def skin_resource_id(voice_key: str) -> str:
+    key = voice_key.strip().strip("/")
+    return _safe_resource_name(key.rsplit("/", 1)[-1], key, "skin_", 12)
+
+
+def _safe_resource_name(raw: str, fallback: str, prefix: str, digest_length: int) -> str:
+    raw = re.sub(r"[^\w\- .·()（）]", "_", raw, flags=re.UNICODE).strip(" ._")
+    if not raw:
+        return prefix + hashlib.sha256(fallback.encode("utf-8")).hexdigest()[:digest_length]
+    if len(raw) > 80:
+        raw = raw[:71] + "_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+    return raw
+
+
+def voice_sources(record: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if "sources" in record:
+        return record["sources"]
+    return [{
+        "label": label, "voice_key": key,
+        "language": language_from_label(label, key),
+        "is_skin": bool(_split_skin_label(label)[1]),
+        "skin_name": skin_name_from_label(label, key),
+        "resource_id": skin_resource_id(key),
+    } for label, key in record["paths"].items()]
 
 
 def parse_voice_record(wikitext: str) -> Dict[str, Any]:
@@ -247,7 +334,10 @@ def parse_voice_record(wikitext: str) -> Dict[str, Any]:
         file_name = fields.get("语音", "").strip()
 
         if file_name:
-            files[title] = file_name
+            if title in constants.VOICE_RESOURCE_IDS:
+                if not re.fullmatch(r"CN_\d{3}\.wav", file_name, re.IGNORECASE):
+                    raise PRTSLookupError(f"语音文件名无效: {title}")
+                files[title] = file_name.lower()
 
         for label, text in _iter_word_templates(fields.get("台词", "")):
             base_label, skin = _split_skin_label(label)
@@ -256,7 +346,9 @@ def parse_voice_record(wikitext: str) -> Dict[str, Any]:
             if language and text:
                 texts.setdefault(skin, {}).setdefault(title, {})[language] = text
 
-    return {"paths": paths, "files": files, "texts": texts}
+    record = {"paths": paths, "files": files, "texts": texts}
+    record["sources"] = voice_sources(record)
+    return record
 
 
 def _iter_word_templates(value: str):

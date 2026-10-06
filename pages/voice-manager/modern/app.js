@@ -102,7 +102,6 @@ const state = {
   archives: [],
   groups: [],
   detail: null,
-  detailGroup: null,
   current: null,
   selecting: false,
   selected: new Set(),
@@ -121,6 +120,8 @@ const state = {
   avatarQueue: new Set(),
   avatarTimer: null,
   voiceTexts: new Map(),
+  detailSequence: 0,
+  audioSequence: 0,
 };
 
 // 每个视图的数据缓存：{ at: 加载时间, signature: 上次渲染内容的签名, pending: 进行中的请求 }
@@ -506,7 +507,6 @@ function groupedVoices(voices) {
 
 function renderPackages(detail) {
   const group = state.groups.find((item) => item.base === detail.base);
-  state.detailGroup = group || null;
   const members = group?.members || [];
   const root = $("#drawer-packages");
   root.hidden = members.length < 2;
@@ -658,7 +658,9 @@ function renderDetail(data) {
 }
 
 async function fetchDetail(character, language = "") {
+  const sequence = ++state.detailSequence;
   const data = await run(() => bridge.apiGet("page/archive", { character, language }));
+  if (sequence !== state.detailSequence) return null;
   renderDetail(data);
   loadVoiceTexts(data.character).catch(() => {});
   return data;
@@ -678,6 +680,7 @@ async function loadVoiceTexts(character) {
 }
 
 function stopAudio() {
+  state.audioSequence += 1;
   const player = $("#audio-player");
   player.pause();
   player.removeAttribute("src");
@@ -692,7 +695,7 @@ async function openArchive(character) {
   state.selecting = false;
   state.selected.clear();
   stopAudio();
-  await fetchDetail(character);
+  if (!(await fetchDetail(character))) return;
   const drawer = $("#drawer");
   drawer.hidden = false;
   document.body.classList.add("has-drawer");
@@ -710,8 +713,10 @@ async function switchPackage(character) {
 
 function closeArchive() {
   const drawer = $("#drawer");
-  if (drawer.hidden) return;
+  state.detailSequence += 1;
+  state.current = null;
   stopAudio();
+  if (drawer.hidden) return;
   drawer.classList.remove("is-open");
   document.body.classList.remove("has-drawer");
   window.setTimeout(() => {
@@ -736,11 +741,14 @@ function base64Blob(encoded, mime) {
 
 async function playVoice(voice) {
   const detail = state.detail;
+  if (!detail) return;
+  const audioSequence = ++state.audioSequence;
+  const sequence = state.detailSequence;
   const data = await run(() =>
     bridge.apiGet("page/audio", { character: detail.character, language: detail.language, voice }),
   );
   // 请求返回前用户可能已经点了别的语音或关掉了详情。
-  if (state.detail !== detail || state.current !== voice) return;
+  if (sequence !== state.detailSequence || audioSequence !== state.audioSequence || state.detail !== detail || state.current !== voice) return;
   stopAudio();
   state.audioUrl = URL.createObjectURL(base64Blob(data.base64, data.mime));
   const player = $("#audio-player");

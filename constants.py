@@ -7,7 +7,7 @@
 # 这三个文件不是 Python，无法引用本常量。
 
 PLUGIN_NAME = "astrbot_plugin_mrfz"
-PLUGIN_VERSION = "3.8.0"
+PLUGIN_VERSION = "3.8.1"
 
 # ============================================================
 # 文件大小限制
@@ -24,10 +24,11 @@ MAX_PREVIEW_BYTES = 12 * 1024 * 1024  # 12MB - 预览文件大小上限
 # ============================================================
 
 SCAN_CACHE_DURATION = 60  # 秒 - 语音文件扫描缓存时间
-MAX_DOWNLOAD_LOCKS = 200  # 下载锁 LRU 缓存大小
 MAX_WAV_VALIDITY_CACHE = 50000  # WAV 头校验结果缓存条目上限
 OPERATOR_CATALOG_TTL = 12 * 3600  # 12小时 - PRTS 干员列表缓存时间
 VOICE_TEXT_TTL = 7 * 24 * 3600  # 7天 - PRTS 台词缓存时间
+VOICE_RECORD_TTL = 3600  # 完整资源记录缓存一小时，迁移不使用过期记录
+VOICE_RECORD_VERSION = 1
 AVATAR_THUMB_SIZE = 96  # 管理页头像缩略图边长（像素）
 MAX_AVATAR_BATCH = 60  # 单次请求的头像数量上限
 MAX_IMPORT_MEMBERS = 160  # ZIP 导入最大文件数量
@@ -64,6 +65,7 @@ RETRYABLE_PAGE_STATUSES = {429, 500, 502, 503, 504}  # 可重试的 HTTP 状态�
 
 VOICE_RESOURCE_MAP_VERSION = 2  # 语音资源映射版本
 VOICE_INDEX_VERSION = 4  # 语音索引结构版本（写入时使用）
+LANGUAGE_ROUTING_VERSION = 2  # 内容核对和持久化补下载任务
 SUPPORTED_VOICE_INDEX_VERSIONS = {3, 4}  # 可读取的索引版本，用于兼容旧数据
 
 # ============================================================
@@ -244,6 +246,12 @@ PRTS_OPERATOR_VOICE_CATEGORY = "Category:干员语音"
 
 # 分类成员分页上限（每页 500 条），防止异常的 continue 无限循环
 PRTS_MAX_CONTINUE_PAGES = 10
+
+# 每批最多 20 个干员（语音页和头像共 40 个标题），避免 GET 地址过长
+PRTS_BATCH_TITLES = 20
+
+# 迁移时核对 CDN 文件大小的并发 HEAD 请求数
+ROUTING_HEAD_CONCURRENCY = 4
 
 # 语音页“路径”参数的语言标签（去掉皮肤括号后）-> 语言代码。
 # 西班牙语、俄语等 voice_custom 语言插件不支持，不在表内即跳过。

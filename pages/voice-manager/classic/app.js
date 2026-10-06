@@ -51,7 +51,6 @@ const LANGUAGES = [
 ];
 
 const state = {
-  context: null,
   view: "overview",
   overview: null,
   archives: [],
@@ -61,6 +60,9 @@ const state = {
   taskTimer: null,
   taskSignature: "",
   archiveTimer: null,
+  detailSequence: 0,
+  archiveSequence: 0,
+  audioSequence: 0,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -298,12 +300,14 @@ function renderArchiveCards(items) {
 }
 
 async function loadArchives() {
+  const sequence = ++state.archiveSequence;
   const params = {
     q: $("#archive-search").value.trim(),
     kind: $("#archive-kind").value,
     language: $("#archive-language").value,
   };
   const data = await run(() => bridge.apiGet("page/archives", params));
+  if (sequence !== state.archiveSequence) return;
   state.archives = data.items || [];
   renderArchiveCards(state.archives);
 }
@@ -382,9 +386,12 @@ function updateArchiveSelection() {
 }
 
 async function openArchive(character, language = "") {
+  stopAudio();
+  const sequence = ++state.detailSequence;
   const data = await run(() =>
     bridge.apiGet("page/archive", { character, language }),
   );
+  if (sequence !== state.detailSequence) return;
   renderArchiveDetail(data);
   $("#archive-drawer").classList.add("is-open");
   $("#archive-drawer").setAttribute("aria-hidden", "false");
@@ -392,6 +399,9 @@ async function openArchive(character, language = "") {
 }
 
 function closeArchive() {
+  state.detailSequence += 1;
+  stopAudio();
+  state.archiveDetail = null;
   $("#archive-drawer").classList.remove("is-open");
   $("#archive-drawer").setAttribute("aria-hidden", "true");
   document.body.style.overflow = "";
@@ -406,8 +416,22 @@ function base64Blob(encoded, mime) {
   return new Blob([bytes], { type: mime || "audio/wav" });
 }
 
+function stopAudio() {
+  state.audioSequence += 1;
+  const player = $("#audio-player");
+  player.pause();
+  player.removeAttribute("src");
+  player.load();
+  if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
+  state.audioUrl = null;
+  $("#audio-dock").classList.add("is-hidden");
+}
+
 async function previewVoice(voice) {
   const detail = state.archiveDetail;
+  if (!detail) return;
+  const sequence = ++state.audioSequence;
+  const detailSequence = state.detailSequence;
   const data = await run(() =>
     bridge.apiGet("page/audio", {
       character: detail.character,
@@ -415,6 +439,7 @@ async function previewVoice(voice) {
       voice,
     }),
   );
+  if (sequence !== state.audioSequence || detailSequence !== state.detailSequence || detail !== state.archiveDetail) return;
   if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
   state.audioUrl = URL.createObjectURL(base64Blob(data.base64, data.mime));
   const player = $("#audio-player");
@@ -1168,12 +1193,7 @@ function bindEvents() {
     await reloadArchiveDetail();
     await loadArchives();
   });
-  $("#audio-close").addEventListener("click", () => {
-    $("#audio-player").pause();
-    $("#audio-dock").classList.add("is-hidden");
-    if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
-    state.audioUrl = null;
-  });
+  $("#audio-close").addEventListener("click", stopAudio);
   $("#fetch-form").addEventListener("submit", submitFetch);
   $("#tasks-refresh").addEventListener("click", () => loadTasks());
   $("#task-list").addEventListener("click", async (event) => {
@@ -1245,11 +1265,8 @@ async function initialize() {
     toast("此页面必须从 AstrBot 插件详情页打开。", "error");
     return;
   }
-  state.context = await bridge.ready();
+  await bridge.ready();
   document.title = bridge.t?.("pages.voice-manager.title", "语音档案控制台") || "语音档案控制台";
-  bridge.onContext?.((context) => {
-    state.context = context;
-  });
   renderLanguages();
   bindEvents();
   setConnection(true, "AstrBot 已连接");

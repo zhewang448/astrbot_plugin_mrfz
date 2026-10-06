@@ -58,6 +58,8 @@ class MyPlugin(Star):
         # 预热 PRTS 干员列表，供下载失败时给出拼写提示。单独成任务，
         # 避免网络慢时拖住依赖启动任务的首次扫描；失败只记日志。
         self._catalog_task = asyncio.create_task(self.voice_mgr.get_operator_catalog())
+        # 修正旧版本放错语言目录的语音；不阻塞首次扫描，失败时下次启动重试。
+        self._routing_task = asyncio.create_task(self._migrate_language_routing())
 
         # 7. 注册 AstrBot Plugin Page 管理端
         self.voice_page = VoicePageManager(
@@ -188,6 +190,74 @@ class MyPlugin(Star):
         except Exception as exc:
             logger.warning(f"启动资源迁移或检查失败，将在下次启动重试: {exc}")
 
+    async def _migrate_language_routing(self) -> None:
+        # 等旧版皮肤目录迁移和皮肤索引补齐完成，修正时要用到皮肤目录。
+        await self._startup_task
+
+        try:
+            moved = await self.voice_mgr.migrate_language_routing()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(f"语音语言目录修正失败，将在下次启动重试: {exc}")
+            return
+
+        if moved and self._retarget_bindings(moved) and not self.voice_mgr._routing_refills:
+            with self.voice_mgr.file_lock:
+                self.voice_mgr._routing_moves = {}
+                try:
+                    self.voice_mgr.save_voice_index()
+                except OSError as exc:
+                    self.voice_mgr._routing_moves = moved
+                    logger.warning(f"语言绑定修正状态保存失败，下次启动重试: {exc}")
+
+    def _retarget_bindings(self, moved: Dict[str, Dict[str, str]]) -> bool:
+        """语音挪到正确语言目录后，把指向旧语言的快捷绑定一并改过去。"""
+        changed = False
+        previous = []
+        routes = {}
+        for reference, languages in moved.items():
+            parsed = self.voice_mgr._parse_character_reference(reference)
+            if not parsed:
+                continue
+            canonical = self.voice_mgr.resolve_operator_alias(parsed[0])
+            if parsed[1]:
+                canonical, _ = self.voice_mgr.resolve_character_reference(reference)
+            if canonical:
+                for old, new in languages.items():
+                    routes.setdefault((canonical, old), set()).add(new)
+
+        for info in self.custom_mappings.values():
+            character = str(info.get("character", ""))
+            voice = str(info.get("voice", ""))
+            language = info.get("lang")
+            parsed = self.voice_mgr._parse_character_reference(character)
+
+            if not parsed or not language:
+                continue
+
+            canonical = self.voice_mgr.resolve_operator_alias(parsed[0])
+            if parsed[1]:
+                canonical, _ = self.voice_mgr.resolve_character_reference(character)
+            candidates = routes.get((canonical, language), set())
+            target = next(iter(candidates)) if len(candidates) == 1 else None
+
+            if (
+                target
+                and self.voice_mgr.get_voice_path(character, voice, language) is None
+                and self.voice_mgr.get_voice_path(character, voice, target)
+            ):
+                previous.append((info, language))
+                info["lang"] = target
+                changed = True
+
+        if changed and not self._save_custom_commands():
+            for info, language in previous:
+                info["lang"] = language
+            logger.warning("快捷绑定的语言修正未能保存，请检查数据目录权限")
+            return False
+        return True
+
     async def _scan_if_needed(
         self,
         force: bool = False,
@@ -205,7 +275,8 @@ class MyPlugin(Star):
         async with self._scan_lock:
             current_time = time.monotonic()
 
-            if force or current_time - self._last_scan_time > constants.SCAN_CACHE_DURATION:
+            last_scan = max(self._last_scan_time, self.voice_mgr.last_scan_time)
+            if force or current_time - last_scan > constants.SCAN_CACHE_DURATION:
                 await asyncio.to_thread(self.voice_mgr.scan_voice_files)
                 self._last_scan_time = current_time
 
@@ -651,7 +722,7 @@ class MyPlugin(Star):
                     )
                     return
 
-                await self._scan_if_needed(force=True)
+                await self._scan_if_needed()
 
                 resolved_character, skin_options = (
                     self.voice_mgr.resolve_character_reference(character)
@@ -1003,7 +1074,7 @@ class MyPlugin(Star):
         )
 
         if success:
-            await self._scan_if_needed(force=True)
+            await self._scan_if_needed()
         else:
             message += self._operator_hint(character)
 
@@ -1062,7 +1133,7 @@ class MyPlugin(Star):
         if voice_page is not None:
             await voice_page.terminate()
 
-        for name in ("_catalog_task", "_startup_task"):
+        for name in ("_routing_task", "_catalog_task", "_startup_task"):
             task = getattr(self, name, None)
 
             if task is None or task.done():
