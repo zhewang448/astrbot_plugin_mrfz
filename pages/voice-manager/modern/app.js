@@ -1,4 +1,5 @@
 const bridge = window.AstrBotPluginPage;
+let settings;
 
 // 语音按游戏内的使用场景分组，详情页按组排列；后端返回了不在表里的语音会归入“其他”。
 const VOICE_GROUPS = [
@@ -49,12 +50,16 @@ const VOICE_GROUPS = [
 const VOICE_TYPES = VOICE_GROUPS.flatMap((group) => group.voices);
 
 const LANGUAGES = [
-  { code: "fy", name: "方言", rank: "1" },
-  { code: "cn", name: "中文", rank: "2" },
-  { code: "jp", name: "日语", rank: "3" },
-  { code: "us", name: "英语", rank: "4" },
-  { code: "kr", name: "韩语", rank: "5" },
-  { code: "it", name: "意语", rank: "6" },
+  { code: "fy", name: "方言" },
+  { code: "cn", name: "中文" },
+  { code: "jp", name: "日语" },
+  { code: "us", name: "英语" },
+  { code: "kr", name: "韩语" },
+  { code: "it", name: "意语" },
+  { code: "ru", name: "俄语" },
+  { code: "de", name: "德语" },
+  { code: "es", name: "西班牙语" },
+  { code: "fr", name: "法语" },
 ];
 
 const STATUS_LABELS = {
@@ -252,6 +257,7 @@ const VIEW_LOADERS = {
   bindings: (options) => loadBindings(options),
   aliases: (options) => loadAliases(options),
   recovery: (options) => loadRecovery(options),
+  settings: () => settings.load(),
 };
 
 function switchView(view, { focus = false } = {}) {
@@ -985,8 +991,8 @@ function renderFetchLanguages() {
   $("#fetch-languages").innerHTML = LANGUAGES.map(
     (item) => `
       <label class="check">
-        <input type="checkbox" name="fetch-language" value="${item.rank}" ${
-          ["1", "2", "3"].includes(item.rank) ? "checked" : ""
+        <input type="checkbox" name="fetch-language" value="${item.code}" ${
+          ["fy", "cn", "jp"].includes(item.code) ? "checked" : ""
         } />
         <span>${escapeHtml(item.name)}</span>
       </label>
@@ -997,8 +1003,7 @@ function renderFetchLanguages() {
 function fetchOptions() {
   return {
     languages: $$('input[name="fetch-language"]:checked')
-      .map((input) => input.value)
-      .join(""),
+      .map((input) => input.value),
     includeSkin: $("#fetch-skin").checked,
   };
 }
@@ -1066,7 +1071,7 @@ async function submitFetch(event) {
     $("#fetch-character").focus();
     return;
   }
-  if (!languages) {
+  if (!languages.length) {
     toast("至少选择一种语言", "error");
     return;
   }
@@ -1223,11 +1228,11 @@ async function downloadRoster() {
   const names = [...state.rosterSelected];
   const { languages, includeSkin } = fetchOptions();
   if (!names.length) return;
-  if (!languages) {
+  if (!languages.length) {
     toast("至少在上方选择一种语言", "error");
     return;
   }
-  const languageNames = LANGUAGES.filter((item) => languages.includes(item.rank)).map((item) => item.name);
+  const languageNames = languages.map(languageName);
   const confirmed = await modalConfirm({
     title: `下载 ${names.length} 名干员的语音`,
     message: `语言：${languageNames.join("、")}${includeSkin ? "，包含皮肤语音" : ""}。每名干员是一个后台任务，同时最多下载两名。`,
@@ -1821,6 +1826,11 @@ async function initialize() {
   document.title = bridge.t?.("pages.voice-manager.title", "语音档案控制台") || "语音档案控制台";
   renderLanguageFilter();
   renderFetchLanguages();
+  settings = window.VoiceSettings({bridge, root: $("#view-settings"), onChange(config) {
+    $$('input[name="fetch-language"]').forEach(input => { input.checked = config.auto_download_language.includes(languageName(input.value)); });
+    $("#fetch-skin").checked = config.auto_download_skin;
+  }});
+  await settings.load();
   bindEvents();
   await Promise.allSettled([loadOverview(), loadArchives()]);
   // 干员列表在后台预取，切到下载页时就不用等。

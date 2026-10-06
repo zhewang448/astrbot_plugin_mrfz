@@ -14,7 +14,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 # 引入拆分后的模块
 from . import constants
-from .config import PluginConfig
+from .config import ConfigStore
 from .data_source import VoiceManager
 from .renderer import VoiceRenderer
 from .voice_page import VoicePageManager
@@ -36,7 +36,10 @@ class MyPlugin(Star):
         self.custom_cmd_file = self.data_dir / "custom_commands.json"
 
         # 2. 加载配置
-        self.plugin_config = PluginConfig.from_dict(config)
+        self.config_store = ConfigStore(config, self.data_dir / "config_backups")
+        self.plugin_config = self.config_store.current
+        if self.config_store.migration_error:
+            logger.warning(self.config_store.migration_error)
 
         # 3. 初始化核心模块
         self.voice_mgr = VoiceManager(self.data_dir, self.plugin_dir)
@@ -69,11 +72,18 @@ class MyPlugin(Star):
             save_custom_commands=self._save_custom_commands,
             scan_callback=self._scan_if_needed,
             valid_trigger=self._valid_trigger,
-            default_language_rank=self.plugin_config.default_language_rank,
-            default_download_langs=self.plugin_config.auto_download_language,
+            default_download_langs=self.plugin_config.download_languages,
             default_download_skin=self.plugin_config.auto_download_skin,
             page_style=self.plugin_config.page_style,
+            config_store=self.config_store,
+            apply_config=self._apply_config,
         )
+
+    def _apply_config(self, config) -> None:
+        self.plugin_config = config
+        self.voice_page.default_download_langs = list(config.download_languages)
+        self.voice_page.default_download_skin = config.auto_download_skin
+        self.voice_page.page_style = config.page_style
 
     # ================== 持久化存储逻辑 ==================
 
@@ -181,7 +191,7 @@ class MyPlugin(Star):
     async def _initialize_resources(self) -> None:
         try:
             await self.voice_mgr.migrate_legacy_skin_directories(
-                self.plugin_config.auto_download_language,
+                self.plugin_config.download_languages,
             )
             await self.voice_mgr.refresh_local_skin_metadata()
             await self.voice_mgr.ensure_assets()
@@ -299,7 +309,7 @@ class MyPlugin(Star):
         success, message = await self.voice_mgr.fetch_character_voices(
             character,
             True,
-            language_info["rank"],
+            [language],
             require_no_failures=True,
         )
 
@@ -425,7 +435,7 @@ class MyPlugin(Star):
 
         auto_code = self.voice_mgr.choose_language(
             display_character,
-            self.plugin_config.default_language_rank,
+            self.plugin_config.language_priority,
         )
 
         if auto_code == "nodownload":
@@ -563,7 +573,7 @@ class MyPlugin(Star):
         if not lang_code:
             lang_code = self.voice_mgr.choose_language(
                 character,
-                self.plugin_config.default_language_rank,
+                self.plugin_config.language_priority,
             )
 
         if lang_code == "nodownload":
@@ -713,7 +723,7 @@ class MyPlugin(Star):
                 success, message = await self.voice_mgr.fetch_character_voices(
                     character,
                     self.plugin_config.auto_download_skin,
-                    self.plugin_config.auto_download_language,
+                    self.plugin_config.download_languages,
                 )
 
                 if not success:
@@ -754,7 +764,7 @@ class MyPlugin(Star):
         else:
             target_lang = self.voice_mgr.choose_language(
                 character,
-                self.plugin_config.default_language_rank,
+                self.plugin_config.language_priority,
             )
 
         if target_lang == "nodownload":
@@ -948,7 +958,7 @@ class MyPlugin(Star):
 
         resolved_lang = lang_code or self.voice_mgr.choose_language(
             character,
-            self.plugin_config.default_language_rank,
+            self.plugin_config.language_priority,
         )
 
         if resolved_lang != "nodownload":
@@ -1070,7 +1080,7 @@ class MyPlugin(Star):
         success, message = await self.voice_mgr.fetch_character_voices(
             character,
             True,
-            "123456",
+            list(self.voice_mgr.LANGUAGE_MAP),
         )
 
         if success:

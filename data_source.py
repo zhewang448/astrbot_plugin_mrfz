@@ -1195,7 +1195,7 @@ class VoiceManager:
     def choose_language(
         self,
         character: str,
-        rank_config: str,
+        rank_config: str | List[str],
     ) -> str:
         available = self.voice_index.get(
             character,
@@ -1205,13 +1205,7 @@ class VoiceManager:
         if not available:
             return "nodownload"
 
-        rank_to_language = {
-            value["rank"]: language for language, value in self.LANGUAGE_MAP.items()
-        }
-
-        for rank in str(rank_config):
-            language = rank_to_language.get(rank)
-
+        for language in constants.normalize_languages(rank_config):
             if language in available:
                 return language
 
@@ -1439,7 +1433,8 @@ class VoiceManager:
             return
 
         try:
-            self._atomic_write_json(path, {"fetchedAt": time.time(), "texts": texts})
+            self._atomic_write_json(path, {"version": constants.VOICE_RECORD_VERSION,
+                                           "fetchedAt": time.time(), "texts": texts})
         except OSError as exc:
             logger.debug(f"保存 {character} 的台词缓存失败: {exc}")
 
@@ -1454,6 +1449,7 @@ class VoiceManager:
         cached = self._read_json_file(path)
 
         if cached is not None and (
+            cached.get("version") == constants.VOICE_RECORD_VERSION and
             time.time() - float(cached.get("fetchedAt", 0)) < constants.VOICE_TEXT_TTL
         ):
             return cached.get("texts") or {}
@@ -1498,10 +1494,11 @@ class VoiceManager:
         )
 
     def build_download_plan(
-        self, character: str, record: Dict[str, Any], include_skin: bool, ranks: str,
+        self, character: str, record: Dict[str, Any], include_skin: bool, ranks: str | List[str],
     ) -> List[Dict[str, Any]]:
         """预览和下载共用计划；本地编号表仅用于完整的旧缓存修复。"""
         base = self.resolve_operator_alias(self._base_character(character))
+        selected_languages = set(constants.normalize_languages(ranks))
         plan = []
         packages = dict(self.skin_metadata.get(base, {}))
         for source in prts.voice_sources(record):
@@ -1516,7 +1513,7 @@ class VoiceManager:
                                     and resource_id != source["resource_id"])}
                 directory = self._skin_directory_name(base, source["resource_id"], source["skin_name"], packages)
                 packages[source["resource_id"]] = {"directory": directory}
-            if self.LANGUAGE_MAP[language]["rank"] not in ranks or (source["is_skin"] and not include_skin):
+            if language not in selected_languages or (source["is_skin"] and not include_skin):
                 continue
             repairing = (base, language) in self._voice_remap_pending
             files = ({title: f"cn_{number:03d}.wav" for title, number in self.VOICE_RESOURCE_IDS.items()}
@@ -1554,7 +1551,7 @@ class VoiceManager:
         self,
         character: str,
         auto_download_skin: bool,
-        download_langs: str,
+        download_langs: str | List[str],
         *,
         require_no_failures: bool = False,
         progress: Optional[Callable[[int, int, str], None]] = None,
@@ -1574,10 +1571,9 @@ class VoiceManager:
         base_character = self.resolve_operator_alias(parsed[0])
         redirect_target = None
 
-        valid_ranks = {item["rank"] for item in self.LANGUAGE_MAP.values()}
-        selected_ranks = {rank for rank in str(download_langs) if rank in valid_ranks}
+        selected_languages = constants.normalize_languages(download_langs)
 
-        if not selected_ranks:
+        if not selected_languages:
             return (
                 False,
                 "没有选择任何有效语言",
@@ -1643,7 +1639,7 @@ class VoiceManager:
                             if source["is_skin"] and not auto_download_skin
                         }
                         plan = self.build_download_plan(
-                            base_character, record, auto_download_skin, "".join(selected_ranks),
+                            base_character, record, auto_download_skin, selected_languages,
                         )
                         for source in sources:
                             if source["is_skin"] and source["language"] and auto_download_skin:
@@ -1744,7 +1740,7 @@ class VoiceManager:
 
     async def migrate_legacy_skin_directories(
         self,
-        download_langs: str,
+        download_langs: str | List[str],
     ) -> None:
         """
         把 角色/skin/语言/*.wav 旧结构迁移到具名皮肤目录。
@@ -1782,28 +1778,16 @@ class VoiceManager:
         if not migrations:
             return
 
-        configured_ranks = {
-            rank
-            for rank in str(download_langs)
-            if rank in {item["rank"] for item in self.LANGUAGE_MAP.values()}
-        }
+        configured_languages = constants.normalize_languages(download_langs)
 
         for character, legacy_languages in migrations.items():
-            required_ranks = {
-                self.LANGUAGE_MAP[language]["rank"] for language in legacy_languages
-            }
-            selected_ranks = "".join(
-                sorted(
-                    configured_ranks | required_ranks,
-                    key=int,
-                )
-            )
+            selected_languages = list(dict.fromkeys([*configured_languages, *legacy_languages]))
 
             logger.info(f"检测到 {character} 的旧版皮肤目录，正在从 PRTS 迁移具名皮肤")
             success, message = await self.fetch_character_voices(
                 character,
                 True,
-                selected_ranks,
+                selected_languages,
                 require_no_failures=True,
             )
 

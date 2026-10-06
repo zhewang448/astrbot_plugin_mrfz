@@ -1,5 +1,7 @@
 """明日方舟语音插件全局常量定义"""
 
+import re
+
 # ============================================================
 # 插件标识
 # ============================================================
@@ -7,7 +9,7 @@
 # 这三个文件不是 Python，无法引用本常量。
 
 PLUGIN_NAME = "astrbot_plugin_mrfz"
-PLUGIN_VERSION = "3.8.1"
+PLUGIN_VERSION = "3.8.2"
 
 # ============================================================
 # 文件大小限制
@@ -28,7 +30,7 @@ MAX_WAV_VALIDITY_CACHE = 50000  # WAV 头校验结果缓存条目上限
 OPERATOR_CATALOG_TTL = 12 * 3600  # 12小时 - PRTS 干员列表缓存时间
 VOICE_TEXT_TTL = 7 * 24 * 3600  # 7天 - PRTS 台词缓存时间
 VOICE_RECORD_TTL = 3600  # 完整资源记录缓存一小时，迁移不使用过期记录
-VOICE_RECORD_VERSION = 1
+VOICE_RECORD_VERSION = 2  # 新增小众语言，刷新旧解析记录与台词缓存
 AVATAR_THUMB_SIZE = 96  # 管理页头像缩略图边长（像素）
 MAX_AVATAR_BATCH = 60  # 单次请求的头像数量上限
 MAX_IMPORT_MEMBERS = 160  # ZIP 导入最大文件数量
@@ -65,7 +67,7 @@ RETRYABLE_PAGE_STATUSES = {429, 500, 502, 503, 504}  # 可重试的 HTTP 状态�
 
 VOICE_RESOURCE_MAP_VERSION = 2  # 语音资源映射版本
 VOICE_INDEX_VERSION = 4  # 语音索引结构版本（写入时使用）
-LANGUAGE_ROUTING_VERSION = 2  # 内容核对和持久化补下载任务
+LANGUAGE_ROUTING_VERSION = 3  # 重新核对旧版本被当作中文的小众语言
 SUPPORTED_VOICE_INDEX_VERSIONS = {3, 4}  # 可读取的索引版本，用于兼容旧数据
 
 # ============================================================
@@ -155,7 +157,53 @@ LANGUAGE_MAP = {
         "rank": "6",
         "color": (0, 131, 143),
     },
+    "ru": {"name": "俄语", "rank": "7", "color": (136, 80, 130)},
+    "de": {"name": "德语", "rank": "8", "color": (90, 105, 55)},
+    "es": {"name": "西班牙语", "rank": "9", "color": (190, 110, 30)},
+    "fr": {"name": "法语", "rank": "10", "color": (60, 110, 160)},
 }
+
+
+def parse_language_ranks(value: str) -> list[str]:
+    """接受旧单字符序列或逗号分隔的完整编号，保留顺序并去重。"""
+    text = str(value).strip()
+    valid = {info["rank"] for info in LANGUAGE_MAP.values()}
+    if re.search(r"[,，\s]", text):
+        ranks = re.split(r"[,，\s]+", text)
+    elif text in valid:
+        ranks = [text]
+    else:
+        ranks = list(text)
+    return list(dict.fromkeys(rank for rank in ranks if rank in valid))
+
+
+DEFAULT_LANGUAGE_PRIORITY = ("fy", "cn", "jp", "us", "kr", "it")
+DEFAULT_DOWNLOAD_LANGUAGES = ("fy", "cn", "jp")
+
+
+def normalize_languages(value) -> list[str]:
+    """语言名称/代码列表；旧数字串仅在兼容入口转换。"""
+    if isinstance(value, str):
+        ranks = parse_language_ranks(value)
+        if re.fullmatch(r"[\d,，\s]+", value):
+            rank_to_code = {info["rank"]: code for code, info in LANGUAGE_MAP.items()}
+            return [rank_to_code[rank] for rank in ranks]
+        values = re.split(r"[,，\s]+", value.strip()) if value.strip() else []
+    elif isinstance(value, (list, tuple)):
+        values = value
+    else:
+        raise ValueError("语言配置必须是语言名称列表")
+    names = {info["name"]: code for code, info in LANGUAGE_MAP.items()}
+    result = []
+    for item in values:
+        if not isinstance(item, str):
+            raise ValueError("语言名称必须是字符串")
+        code = names.get(item, LANG_ALIAS.get(item.strip().lower()))
+        if code not in LANGUAGE_MAP:
+            raise ValueError(f"不支持的语言：{item}")
+        if code not in result:
+            result.append(code)
+    return result
 
 # 语言别名映射
 LANG_ALIAS = {
@@ -190,6 +238,10 @@ LANG_ALIAS = {
     "意": "it",
     "it": "it",
     "6": "it",
+    "俄语": "ru", "俄文": "ru", "俄": "ru", "ru": "ru", "7": "ru",
+    "德语": "de", "德文": "de", "德": "de", "de": "de", "8": "de",
+    "西班牙语": "es", "西班牙文": "es", "西语": "es", "西": "es", "es": "es", "9": "es",
+    "法语": "fr", "法文": "fr", "法": "fr", "fr": "fr", "10": "fr",
 }
 
 # 常用明日方舟干员别称。键为用户输入，值为标准干员名。
@@ -254,7 +306,7 @@ PRTS_BATCH_TITLES = 20
 ROUTING_HEAD_CONCURRENCY = 4
 
 # 语音页“路径”参数的语言标签（去掉皮肤括号后）-> 语言代码。
-# 西班牙语、俄语等 voice_custom 语言插件不支持，不在表内即跳过。
+# voice_custom 包含不同语言，必须按标签识别；未知标签仍跳过。
 PRTS_LANGUAGE_LABELS = {
     "日语": "jp",
     "日文": "jp",
@@ -264,6 +316,10 @@ PRTS_LANGUAGE_LABELS = {
     "英语": "us",
     "韩语": "kr",
     "意大利语": "it",
+    "俄语": "ru",
+    "德语": "de",
+    "西班牙语": "es",
+    "法语": "fr",
 }
 
 # “联动”标签按资源目录判断语言
