@@ -44,7 +44,7 @@ BRIDGE = """(() => {
     ready: async () => {},
     apiGet: async (route) => {
       if (route === 'page/config') return structuredClone(testSettings);
-      if (route === 'page/overview') return { version: '3.8.2', summary: {} };
+      if (route === 'page/overview') return { version: '3.8.3', summary: {} };
       if (route === 'page/archive') return {
         character: 'Operator', language: 'fr', availableLanguages: ['fy','cn','jp','us','kr','it','ru','de','es','fr'],
         voices: [], packages: [], permissions: {}
@@ -79,6 +79,7 @@ def check_pages(output):
                 frontend = REPO / "pages" / "voice-manager" / style
                 html = (frontend / "index.html").read_text(encoding="utf-8")
                 html = html.replace('<script type="module" src="./app.js"></script>', "")
+                html = html.replace('<script src="../common.js"></script>', "")
                 html = html.replace('<script src="../settings.js"></script>', "")
                 html = html.replace('<link rel="stylesheet" href="./style.css" />', "")
                 html = html.replace('<link rel="stylesheet" href="../settings.css" />', "")
@@ -86,6 +87,7 @@ def check_pages(output):
                 page.add_style_tag(content=(frontend / "style.css").read_text(encoding="utf-8"))
                 page.add_style_tag(content=(frontend.parent / "settings.css").read_text(encoding="utf-8"))
                 page.evaluate(BRIDGE)
+                page.add_script_tag(content=(frontend.parent / "common.js").read_text(encoding="utf-8"))
                 page.add_script_tag(content=(frontend.parent / "settings.js").read_text(encoding="utf-8"))
                 page.add_script_tag(content=(frontend / "app.js").read_text(encoding="utf-8"))
                 page.wait_for_function("document.querySelectorAll('input[name=fetch-language]').length === 10")

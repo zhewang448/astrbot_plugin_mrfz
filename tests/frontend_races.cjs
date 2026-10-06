@@ -11,8 +11,11 @@ function functionSource(source, name) {
   return match ? tail.slice(0, match.index) : tail;
 }
 
+const pages = path.join(__dirname, "..", "pages", "voice-manager");
+const commonSource = fs.readFileSync(path.join(pages, "common.js"), "utf8");
+
 function fixture(style) {
-  const source = fs.readFileSync(path.join(__dirname, "..", "pages", "voice-manager", style, "app.js"), "utf8");
+  const source = fs.readFileSync(path.join(pages, style, "app.js"), "utf8");
   const pending = [];
   const nodes = new Map();
   let plays = 0;
@@ -40,8 +43,13 @@ function fixture(style) {
     document: { body: { style: {}, classList: { add() {}, remove() {} } } },
     window: { requestAnimationFrame: action => action(), setTimeout: action => action() },
   });
-  for (const name of ["stopAudio", "closeArchive", "openArchive", style === "modern" ? "fetchDetail" : "loadArchives",
-    style === "modern" ? "playVoice" : "previewVoice"]) {
+  // 共享的音频缓存来自 common.js；base64Blob 保留上面的桩，方便断言播放的是哪一次响应。
+  vm.runInContext(commonSource, context);
+  for (const name of ["audioKey", "cachedAudio", "cacheAudio"]) context[name] = context.window.VoiceCommon[name];
+  const names = ["stopAudio", "closeArchive", "openArchive", style === "modern" ? "fetchDetail" : "loadArchives",
+    style === "modern" ? "playVoice" : "previewVoice"];
+  if (style === "classic") names.push("filteredArchives");
+  for (const name of names) {
     vm.runInContext(functionSource(source, name), context);
   }
   return { context, state, pending, $, plays: () => plays };
