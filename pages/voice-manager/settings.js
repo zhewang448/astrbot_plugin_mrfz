@@ -98,6 +98,10 @@ window.VoiceSettings = function createSettings({ bridge, root, onChange }) {
     }
     if (input.matches("[data-config-add]") && input.value) draft.default_language_rank.push(input.value);
     render();
+    // render 会重建语言复选框，键盘操作时把焦点还给对应的新节点。
+    if (input.dataset.configLanguage) {
+      $(`[data-config-language="${CSS.escape(input.dataset.configLanguage)}"]`)?.focus();
+    }
   });
   root.addEventListener("click", event => {
     const button = event.target.closest("button");
@@ -115,6 +119,11 @@ window.VoiceSettings = function createSettings({ bridge, root, onChange }) {
     if (button.dataset.configMove) {
       const index = Number(button.dataset.index) + (button.dataset.configMove === "up" ? -1 : 1);
       $(`[data-config-move="${button.dataset.configMove}"][data-index="${index}"]`)?.focus();
+    }
+    if (button.hasAttribute("data-config-remove")) {
+      // 焦点移到顶替上来的那一项；删的是最后一项就移到上一项，列表空了就移到“添加语言”。
+      const index = Number(button.dataset.configRemove);
+      ($(`[data-config-remove="${index}"]`) || $(`[data-config-remove="${index - 1}"]`) || $("[data-config-add]"))?.focus();
     }
   });
   $("form").addEventListener("submit", async event => {
