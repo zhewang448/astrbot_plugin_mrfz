@@ -103,6 +103,90 @@ class SafetyTests(unittest.IsolatedAsyncioTestCase):
         for invalid in (b"RIFF\0\0\0\0WAVE", valid[:44], valid[:-1], b"not audio"):
             self.assertFalse(VM._looks_like_wav(invalid))
 
+    def test_language_rank_compatibility_and_exact_tokens(self):
+        parse = data.constants.parse_language_ranks
+        self.assertEqual(parse("123456"), list("123456"))
+        self.assertEqual(parse("10"), ["10"])
+        self.assertEqual(parse("7,8,9,10"), ["7", "8", "9", "10"])
+        self.assertEqual(parse("10 2，10,99"), ["10", "2"])
+        self.mgr.voice_index["Operator"] = ["fy", "cn", "fr"]
+        self.assertEqual(self.mgr.choose_language("Operator", "10,2,1"), "fr")
+        self.assertEqual(self.mgr.choose_language("Operator", "123456"), "fy")
+
+    def test_minority_languages_share_custom_folder_without_collision(self):
+        paths = {"\u4fc4\u8bed": "voice_custom/russian",
+                 "\u5fb7\u8bed": "voice_custom/german",
+                 "\u897f\u73ed\u7259\u8bed": "voice_custom/spanish",
+                 "\u6cd5\u8bed": "voice_custom/french",
+                 "\u672a\u77e5\u8bed\u8a00": "voice_custom/unknown",
+                 "\u4e2d\u6587-\u65b9\u8a00": "voice_custom/dialect"}
+        record = {**self.record, "paths": paths}
+        plan = self.mgr.build_download_plan("Operator", record, True, "7,8,9,10")
+        self.assertEqual({item["language"] for item in plan}, {"ru", "de", "es", "fr"})
+        french = self.mgr.build_download_plan("Operator", record, True, "10")
+        self.assertEqual([item["language"] for item in french], ["fr"])
+        self.assertTrue(all("/voice_custom/" in item["url"] for item in plan))
+        for language in ("ru", "de", "es", "fr"):
+            write_wav(self.target(lang=language))
+        self.mgr.scan_voice_files()
+        for language in ("ru", "de", "es", "fr"):
+            self.assertEqual(self.mgr.get_voice_path("Operator", self.titles[0], language), self.target(lang=language))
+
+    def test_minority_text_labels_and_stale_caches(self):
+        text = "|\u8def\u5f84=\u6cd5\u8bed:voice_custom/french\n|\u6807\u98981=" + self.titles[0] + "\n|\u8bed\u97f31=CN_001.wav\n|\u53f0\u8bcd1="
+        text += "{{VoiceData/word|\u4fc4\u6587|Russian}}{{VoiceData/word|\u5fb7\u6587|German}}{{VoiceData/word|\u897f\u73ed\u7259\u6587|Spanish}}{{VoiceData/word|\u6cd5\u6587|French}}"
+        record = data.prts.parse_voice_record(text)
+        self.assertEqual(set(record["texts"][""][self.titles[0]]), {"ru", "de", "es", "fr"})
+        self.mgr._voice_records["Operator"] = {"version": 1, "fetchedAt": 9999999999, "record": self.record}
+        self.assertIsNone(self.mgr._cached_voice_record("Operator"))
+
+    def test_page_fetch_selection_keeps_french_rank_whole(self):
+        self.pm.default_download_langs = "123"
+        self.pm.default_download_skin = True
+        operation = self.pm._normalize_fetch_payload({"character": "Operator", "languages": "10,7"})
+        self.assertEqual(operation["languageCodes"], ["fr", "ru"])
+        self.assertEqual(operation["languages"], ["fr", "ru"])
+        legacy = self.pm._normalize_fetch_payload({"character": "Operator", "languages": "123"})
+        self.assertEqual(legacy["languageCodes"], ["fy", "cn", "jp"])
+
+    async def test_fetch_french_does_not_download_dialect(self):
+        record = {**self.record, "paths": {"\u6cd5\u8bed": "voice_custom/french",
+                                           "\u4e2d\u6587-\u65b9\u8a00": "voice_custom/dialect"}}
+        with patch.object(self.mgr, "_get_voice_record", AsyncMock(return_value=record)), \
+             patch.object(self.mgr, "fetch_character_image", AsyncMock(return_value=(True, "ok"))), \
+             patch.object(data.aiohttp, "ClientSession") as session:
+            session.return_value.__aenter__.return_value = types.SimpleNamespace(get=lambda *a, **kw: Response())
+            ok, _ = await self.mgr.fetch_character_voices("Operator", False, "10", require_no_failures=True)
+        self.assertTrue(ok)
+        self.assertIsNotNone(self.mgr.get_voice_path("Operator", self.titles[0], "fr"))
+        self.assertFalse(self.target(lang="fy").exists())
+        self.assertFalse(self.target(lang="cn").exists())
+
+    async def test_verified_minority_audio_migrates_to_exact_language(self):
+        for label, language in (("\u4fc4\u8bed", "ru"), ("\u5fb7\u8bed", "de"),
+                                ("\u897f\u73ed\u7259\u8bed", "es"), ("\u6cd5\u8bed", "fr")):
+            with self.subTest(language=language):
+                character = "Operator_" + language
+                target = write_wav(self.target(character=character))
+                before = target.read_bytes()
+                record = {**self.record, "paths": {label: "voice_custom/" + character}}
+                moved = {}
+                with patch.object(self.mgr, "_remote_voice_sizes", AsyncMock(return_value={1: len(before)})), \
+                     patch.object(self.mgr, "_remote_voice_digest", AsyncMock(return_value=hashlib.sha256(before).digest())):
+                    complete = await self.mgr._fix_character_routing(None, character, record, moved, {},
+                                                                  {"moved": 0, "quarantined": 0})
+                self.assertTrue(complete)
+                self.assertFalse(target.exists())
+                self.assertEqual(self.target(character=character, lang=language).read_bytes(), before)
+                self.assertEqual(moved, {character: {"cn": language}})
+
+    async def test_old_text_cache_is_refreshed_for_new_languages(self):
+        self.mgr._atomic_write_json(self.mgr._voice_text_path("Operator"),
+                                   {"fetchedAt": __import__("time").time(), "texts": {"old": {}}})
+        with patch.object(self.mgr, "_get_voice_record", AsyncMock(return_value={"texts": {"new": {}}})) as lookup:
+            self.assertEqual(await self.mgr.get_voice_texts("Operator"), {"new": {}})
+            lookup.assert_awaited_once()
+
     async def test_active_lock_not_evicted(self):
         lock = self.mgr._lock_for("Busy")
         async with lock:
